@@ -69,7 +69,7 @@ def _parse_protocol(
     raw = "" if result is None else str(result).strip()
     fields = raw.split("\t")
 
-    if len(fields) < minimum_fields or fields[0] != expected_marker:
+    if not fields or fields[0] != expected_marker:
         raise PhotoshopBridgeError(
             operation,
             "Photoshop returned an invalid bridge response: " + repr(raw),
@@ -77,6 +77,8 @@ def _parse_protocol(
             jsx_preview=_clean_jsx_preview(jsx),
         )
 
+    # Error responses intentionally contain fewer fields than success
+    # responses, so inspect the status before enforcing the success schema.
     if len(fields) > 1 and fields[1] == "ERROR":
         name = fields[2] if len(fields) > 2 else "ExtendScriptError"
         message = fields[3] if len(fields) > 3 else "Unknown JSX error"
@@ -86,6 +88,14 @@ def _parse_protocol(
             "ExtendScript " + name + ": " + message +
             ((" (line " + line + ")") if line else ""),
             exception_type="ExtendScriptError",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    if len(fields) < minimum_fields:
+        raise PhotoshopBridgeError(
+            operation,
+            "Photoshop returned an incomplete bridge response: " + repr(raw),
+            exception_type="InvalidBridgeResponse",
             jsx_preview=_clean_jsx_preview(jsx),
         )
 
