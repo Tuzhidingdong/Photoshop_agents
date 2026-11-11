@@ -27,6 +27,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-psd", type=Path, required=True)
     parser.add_argument("--report-path", type=Path)
+    parser.add_argument("--preview-dir", type=Path)
+    parser.add_argument("--preview-max-layers", type=int, default=12)
+    parser.add_argument("--preview-max-dimension", type=int, default=1400)
     parser.add_argument("--execution-mode", choices=("quiet", "interactive"), default="quiet")
     args = parser.parse_args()
 
@@ -35,6 +38,9 @@ def main() -> int:
     result = inspect_psd(
         source,
         report_path=args.report_path,
+        preview_dir=args.preview_dir,
+        preview_max_layers=args.preview_max_layers,
+        preview_max_dimension=args.preview_max_dimension,
         bridge=PhotoshopBridge(execution_mode=args.execution_mode),
     )
     after = sha256(source)
@@ -45,6 +51,16 @@ def main() -> int:
         raise RuntimeError("Inspection layer count does not match the layer tree.")
     if result["layer_count"] < 1:
         raise RuntimeError("The source PSD has no inspectable layers.")
+    if args.preview_dir:
+        previews = result["visual_previews"]
+        composite = next(
+            (item for item in previews if item["node_key"] == "__composite__" and item["status"] == "PASS"),
+            None,
+        )
+        if composite is None or not Path(composite["path"]).is_file():
+            raise RuntimeError("Composite visual preview was not generated.")
+        if not any(item["status"] == "PASS" for item in previews if item["node_key"] != "__composite__"):
+            raise RuntimeError("No individual layer preview could be generated.")
     if len({layer["node_key"] for layer in result["layers"]}) != result["layer_count"]:
         raise RuntimeError("Inspection returned duplicate node keys.")
 
@@ -59,6 +75,7 @@ def main() -> int:
         "smart_object_count": result["smart_object_count"],
         "layer_tree_sha256": result["layer_tree_sha256"],
         "report_path": result.get("report_path"),
+        "visual_previews": result.get("visual_previews", []),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print("STAGE8_INSPECT_PSD_REAL_PHOTOSHOP_TEST=PASS")
