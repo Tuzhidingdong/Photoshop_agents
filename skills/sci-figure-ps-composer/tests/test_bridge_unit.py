@@ -457,11 +457,11 @@ class ScaleBarUnitTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _bridge(self, output=None, mode="pixels", width="120"):
+    def _bridge(self, output=None, mode="pixels", width="120", label="100 px"):
         output = Path(output or self.output_psd)
         response = (
             "SCI_PS_SCALE_BAR\tOK\tFigure_ScaleBar\ta\t" + mode + "\t" +
-            width + "\t100 px\t1000\t800\t0.75\ttrue\t" + str(output)
+            width + "\t" + label + "\t1000\t800\t0.75\ttrue\t" + str(output)
         )
         return FakeScaleBarBridge(output, response)
 
@@ -511,7 +511,7 @@ class ScaleBarUnitTests(unittest.TestCase):
         self.assertIn("doc.close(SaveOptions.DONOTSAVECHANGES)", jsx)
 
     def test_add_scale_bar_physical_mode_uses_calibrated_label(self):
-        bridge = self._bridge(mode="physical", width="75")
+        bridge = self._bridge(mode="physical", width="75", label="10 µm")
         result = add_scale_bar(
             self.input_psd,
             self.output_psd,
@@ -526,7 +526,7 @@ class ScaleBarUnitTests(unittest.TestCase):
 
         self.assertTrue(result["passed"])
         self.assertEqual(result["mode"], "physical")
-        self.assertEqual(result["label"], "100 px")
+        self.assertEqual(result["label"], "10 µm")
         self.assertEqual(result["smart_object_width_px"], 1000)
         self.assertEqual(result["smart_object_height_px"], 800)
         self.assertEqual(result["displayed_pixels_per_source_pixel"], 0.75)
