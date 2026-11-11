@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization has passed the nested-group Photoshop save/reopen test. The Stage 6 PSD/TIFF/PNG publication export has passed real Photoshop verification, including TIFF LZW metadata, RGB mode, DPI, dimensions, and byte-identical PSD preservation. Stage 7 publication preflight is implemented and covered by unit tests; its read-only Photoshop integration test is the final validation step.
+The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences.
 
 ## Runtime requirements
 
@@ -134,7 +134,7 @@ python tests/test_preflight_figure_demo.py `
   --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 ~~~
 
-The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups, embedded Smart Objects, effective PPI, panel-label/text styling, scale-bar geometry, the known synthetic scale calibration, and the Stage 6 PSD/TIFF/PNG bundle. It never saves the inspected PSD. The demo intentionally permits warnings for the low-resolution synthetic panel rasters and the font-normalization test's 9 pt Arial text; use `--strict` to turn warnings into failures.
+The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups, embedded Smart Objects, effective PPI, panel-label/text styling, scale-bar geometry, the known synthetic scale calibration, and the Stage 6 PSD/TIFF/PNG bundle. It never saves the inspected PSD and restores the prior active document, dialog setting, ruler units, and type units. The demo intentionally permits warnings for the low-resolution synthetic panel rasters and the font-normalization test's 9 pt Arial text; use `--strict` to turn warnings into failures. This integration test passed on the user's Photoshop 2026 installation.
 
 ### Bridge behavior
 
@@ -390,7 +390,7 @@ python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5
 python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 ~~~
 
-A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Stage 2 and Stage 3 integration passes additionally require the respective saved PSDs to be reopened in Photoshop and their native document/layer structures to be inspected. Unit tests alone are not proof of Photoshop compatibility.
+A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Each staged integration pass requires the generated PSD or export bundle to be reopened in Photoshop and its native document/layer structure or export metadata to be inspected. The Stage 7 integration pass additionally verifies that the inspected source PSD remains unchanged. Unit tests alone are not proof of Photoshop compatibility.
 
 ## Confirmed environment baseline
 
@@ -405,4 +405,4 @@ The initial real-machine test for this skill reported:
 - Type units verified as TypeUnits.POINTS.
 - A deliberately raised and caught ExtendScript exception returned its marker correctly.
 
-This baseline is specific to the tested Windows machine. Re-run diagnostics after changing Photoshop, Python, or the package version.
+The Stage 7 read-only publication preflight was also executed successfully on this installation against the Stage 5 editable PSD and Stage 6 export bundle; its required checks passed and the source PSD hash remained unchanged. This baseline is specific to the tested Windows machine. Re-run diagnostics after changing Photoshop, Python, or the package version.
