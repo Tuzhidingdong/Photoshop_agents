@@ -24,6 +24,7 @@ from ps_sci_toolkit import (
     unify_fonts,
     export_figure,
     _inspect_export_raster,
+    preflight_figure,
 )
 
 
@@ -974,6 +975,194 @@ class ExportFigureUnitTests(unittest.TestCase):
             self.assertLess(len(str(temp_path)), 240)
             self.assertNotIn(long_basename, temp_path.name)
         self.assertEqual(Path(result["editable_psd"]["path"]).name, long_basename + ".psd")
+
+
+
+class FakePreflightBridge:
+    def __init__(self, response):
+        self.response = response
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        return self.response
+
+
+def _encode_preflight_record(values):
+    from urllib.parse import quote
+    return "|".join(quote(str(value), safe="-_.!~*'()") for value in values)
+
+
+def _make_preflight_response(*, missing_first_smart_object=False):
+    rows = [
+        _encode_preflight_record([
+            "DOC", "Figure_Stage6", 2079, 1583, 300, "RGB",
+            "sRGB IEC61966-2.1", 4, 3 if missing_first_smart_object else 4, 5,
+        ])
+    ]
+    positions = {
+        "a": (35, 35, 1027, 779),
+        "b": (1052, 35, 2044, 779),
+        "c": (35, 804, 1027, 1548),
+        "d": (1052, 804, 2044, 1548),
+    }
+    for panel_id, (left, top, right, bottom) in positions.items():
+        label_left = left + 8
+        label_top = top + 8
+        bar_values = (
+            [1, 72, 8, 900, 700, 972, 708, 1, 898, 698, 974, 710, 1,
+             "10 µm", "ArialMT", 8, "#000000", 930, 670, 972, 680]
+            if panel_id == "a"
+            else [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", "", 0, "", 0, 0, 0, 0]
+        )
+        row = [
+            "PANEL",
+            panel_id,
+            "Group_Panel_" + panel_id,
+            "" if missing_first_smart_object and panel_id == "a" else "Image_Panel_" + panel_id,
+            0 if missing_first_smart_object and panel_id == "a" else 704,
+            0 if missing_first_smart_object and panel_id == "a" else 504,
+            left, top, right, bottom,
+            704 / (right - left) * 300 if not (missing_first_smart_object and panel_id == "a") else 0,
+            504 / (bottom - top) * 300 if not (missing_first_smart_object and panel_id == "a") else 0,
+            1, panel_id, "Arial-BoldMT", 10, "#000000",
+            label_left, label_top, label_left + 14, label_top + 15,
+        ] + bar_values
+        rows.append(_encode_preflight_record(row))
+        rows.append(_encode_preflight_record([
+            "TEXT",
+            "Figure_Stage6/Group_Panel_" + panel_id + "/Panel_Label_" + panel_id,
+            "Panel_Label_" + panel_id,
+            panel_id,
+            "Arial-BoldMT",
+            10,
+            "#000000",
+            label_left,
+            label_top,
+            label_left + 14,
+            label_top + 15,
+        ]))
+    rows.append(_encode_preflight_record([
+        "TEXT",
+        "Figure_Stage6/Group_Panel_a/Scale_Label_a",
+        "Scale_Label_a",
+        "10 µm",
+        "ArialMT",
+        8,
+        "#000000",
+        930, 670, 972, 680,
+    ]))
+    return "SCI_PS_PREFLIGHT\tOK\t" + "\n".join(rows)
+
+
+class PreflightFigureUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Figure_Stage5.psd"
+        self.export_dir = self.root / "exports"
+        self.input_psd.write_bytes(b"unchanged-stage5-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_preflight_checks_panels_scale_calibration_and_export_bundle(self):
+        bridge = FakePreflightBridge(_make_preflight_response())
+        self.export_dir.mkdir()
+        (self.export_dir / "Figure_Stage5.psd").write_bytes(self.input_psd.read_bytes())
+        Image.new("RGB", (2079, 1583), "white").save(
+            self.export_dir / "Figure_Stage5.tif",
+            format="TIFF",
+            compression="tiff_lzw",
+            dpi=(300, 300),
+        )
+        Image.new("RGB", (2079, 1583), "white").save(
+            self.export_dir / "Figure_Stage5.png",
+            format="PNG",
+            dpi=(300, 300),
+        )
+
+        result = preflight_figure(
+            self.input_psd,
+            expected_dpi=300,
+            expected_width_cm=17.6,
+            calibrations={
+                "a": {
+                    "physical_length": 10,
+                    "pixel_size": 0.2,
+                    "unit": "µm",
+                    "tolerance_px": 2.0,
+                }
+            },
+            export_dir=self.export_dir,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["input_sha256_unchanged"])
+        self.assertEqual(result["document"]["panel_group_count"], 4)
+        self.assertEqual(len(result["panels"]), 4)
+        self.assertEqual(len(result["text_layers"]), 5)
+        checks = {item["id"]: item for item in result["checks"]}
+        self.assertEqual(checks["canvas.dpi"]["status"], "PASS")
+        self.assertEqual(checks["canvas.width"]["status"], "PASS")
+        self.assertEqual(checks["panel_a.scale_calibration_width"]["status"], "PASS")
+        self.assertEqual(checks["panel_a.scale_calibration_label"]["status"], "PASS")
+        self.assertEqual(checks["exports.editable_psd"]["status"], "PASS")
+        self.assertEqual(checks["exports.tiff"]["status"], "PASS")
+        self.assertEqual(checks["exports.png"]["status"], "PASS")
+        self.assertEqual(checks["panel_a.effective_ppi"]["status"], "WARN")
+        self.assertGreater(result["warning_count"], 0)
+        self.assertIn("placedLayerEditContents", bridge.jsx_calls[0])
+        self.assertIn("SCI_PS_PREFLIGHT", bridge.jsx_calls[0])
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-stage5-psd")
+
+    def test_preflight_strict_promotes_publication_warnings_to_failures(self):
+        bridge = FakePreflightBridge(_make_preflight_response())
+        result = preflight_figure(
+            self.input_psd,
+            strict=True,
+            bridge=bridge,
+        )
+        self.assertFalse(result["passed"])
+        self.assertGreater(result["failure_count"], 0)
+        self.assertEqual(result["warning_count"], 0)
+
+    def test_preflight_fails_when_a_panel_smart_object_is_missing(self):
+        bridge = FakePreflightBridge(
+            _make_preflight_response(missing_first_smart_object=True)
+        )
+        result = preflight_figure(self.input_psd, bridge=bridge)
+        self.assertFalse(result["passed"])
+        checks = {item["id"]: item for item in result["checks"]}
+        self.assertEqual(checks["structure.smart_objects"]["status"], "FAIL")
+        self.assertEqual(checks["panel_a.smart_object"]["status"], "FAIL")
+
+    def test_preflight_rejects_invalid_calibration_manifest(self):
+        bridge = FakePreflightBridge(_make_preflight_response())
+        with self.assertRaises(ValueError):
+            preflight_figure(
+                self.input_psd,
+                calibrations={"a": {"physical_length": 10, "pixel_size": 0, "unit": "µm"}},
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_preflight_requires_a_panel_group_and_rgb_300_or_600_dpi(self):
+        response = (
+            "SCI_PS_PREFLIGHT\tOK\t" +
+            _encode_preflight_record([
+                "DOC", "BadFigure", 100, 100, 150, "CMYK", "", 0, 0, 0
+            ])
+        )
+        bridge = FakePreflightBridge(response)
+        result = preflight_figure(self.input_psd, bridge=bridge)
+        self.assertFalse(result["passed"])
+        checks = {item["id"]: item for item in result["checks"]}
+        self.assertEqual(checks["canvas.dpi"]["status"], "FAIL")
+        self.assertEqual(checks["canvas.color_mode"]["status"], "FAIL")
+        self.assertEqual(checks["structure.panel_groups"]["status"], "FAIL")
+
 
 
 
