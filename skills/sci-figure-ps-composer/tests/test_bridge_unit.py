@@ -531,7 +531,7 @@ class ScaleBarUnitTests(unittest.TestCase):
         self.assertEqual(result["smart_object_height_px"], 800)
         self.assertEqual(result["displayed_pixels_per_source_pixel"], 0.75)
         self.assertTrue(result["outline"])
-        self.assertIn('"label":"10 \\\\u00b5m"', bridge.jsx_calls[0])
+        self.assertIn('"label":"10 \\u00b5m"', bridge.jsx_calls[0])
 
     def test_add_scale_bar_rejects_source_overwrite(self):
         bridge = self._bridge()
