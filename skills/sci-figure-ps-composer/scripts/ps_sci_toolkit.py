@@ -2801,12 +2801,21 @@ def _build_preflight_figure_jsx(config: Dict[str, Any]) -> str:
     var cfg = __SCI_PREFLIGHT_CONFIG__;
     var previousDialogs = app.displayDialogs;
     var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var previousRulerUnits = null;
+    var previousTypeUnits = null;
+    var rulerUnitsCaptured = false;
+    var typeUnitsCaptured = false;
     var doc = null;
     var smartDoc = null;
     var rows = [];
     var response = "";
 
     try {
+        previousRulerUnits = app.preferences.rulerUnits;
+        rulerUnitsCaptured = true;
+        previousTypeUnits = app.preferences.typeUnits;
+        typeUnitsCaptured = true;
+
         app.displayDialogs = DialogModes.NO;
         app.preferences.rulerUnits = Units.PIXELS;
         app.preferences.typeUnits = TypeUnits.POINTS;
@@ -2993,6 +3002,16 @@ def _build_preflight_figure_jsx(config: Dict[str, Any]) -> str:
             try {
                 app.activeDocument = previousDoc;
             } catch (restoreError) {}
+        }
+        if (typeUnitsCaptured) {
+            try {
+                app.preferences.typeUnits = previousTypeUnits;
+            } catch (restoreTypeUnitsError) {}
+        }
+        if (rulerUnitsCaptured) {
+            try {
+                app.preferences.rulerUnits = previousRulerUnits;
+            } catch (restoreRulerUnitsError) {}
         }
         app.displayDialogs = previousDialogs;
     }
