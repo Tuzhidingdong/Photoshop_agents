@@ -1157,6 +1157,12 @@ class InspectPsdUnitTests(unittest.TestCase):
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
         self.assertIn("container.layers", bridge.jsx_calls[0])
         self.assertIn("app.preferences.rulerUnits = previousRulerUnits", bridge.jsx_calls[0])
+        self.assertIn("document_label", bridge.jsx_calls[0])
+        self.assertIn("Legacy.psd", bridge.jsx_calls[0])
+        self.assertIn("sci_insp_", bridge.jsx_calls[0])
+        self.assertNotIn(str(self.input_psd), bridge.jsx_calls[0])
+        self.assertEqual(result["layers"][-1]["name"], "Background")
+        self.assertTrue(result["layers"][-1]["is_background"])
 
     def test_inspect_psd_can_write_a_new_json_report(self):
         bridge = FakeInspectBridge(_make_inspection_response())
@@ -1168,6 +1174,7 @@ class InspectPsdUnitTests(unittest.TestCase):
         saved = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["source_sha256"], result["source_sha256"])
         self.assertEqual(saved["layer_count"], 5)
+        self.assertEqual(saved["report_path"], str(report_path))
 
     def test_inspect_psd_does_not_overwrite_an_existing_report(self):
         report_path = self.root / "existing.json"
