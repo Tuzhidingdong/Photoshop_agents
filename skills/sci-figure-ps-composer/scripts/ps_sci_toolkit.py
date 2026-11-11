@@ -946,6 +946,321 @@ def compose_grid(
 
     return result
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: editable panel labels
+# ---------------------------------------------------------------------------
+
+PANEL_LABEL_STYLES = ("lowercase", "uppercase", "parenthesized")
+
+
+def _panel_label_text(panel_id: str, style: str) -> str:
+    """Format a panel identifier without changing its underlying group name."""
+    if not panel_id or not panel_id.isalpha():
+        raise ValueError("Panel identifiers must contain letters only.")
+    normalized = panel_id.lower()
+    if style == "lowercase":
+        return normalized
+    if style == "uppercase":
+        return normalized.upper()
+    if style == "parenthesized":
+        return "(" + normalized + ")"
+    raise ValueError("style must be lowercase, uppercase, or parenthesized.")
+
+
+def _parse_hex_color(value: str) -> tuple[int, int, int]:
+    """Parse a #RRGGBB string into integer RGB channels."""
+    if not isinstance(value, str):
+        raise ValueError("color_hex must be a #RRGGBB string.")
+    token = value.strip()
+    if len(token) != 7 or not token.startswith("#"):
+        raise ValueError("color_hex must use the #RRGGBB format.")
+    try:
+        return tuple(int(token[index:index + 2], 16) for index in (1, 3, 5))
+    except ValueError as exc:
+        raise ValueError("color_hex contains a non-hexadecimal value.") from exc
+
+
+def _build_add_panel_labels_jsx(config: Dict[str, Any]) -> str:
+    """Build JSX that adds editable text layers and saves a separate PSD."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function px(value) {
+        return value.as("px");
+    }
+    function labelFor(panelId, style) {
+        var lower = panelId.toLowerCase();
+        if (style === "lowercase") {
+            return lower;
+        }
+        if (style === "uppercase") {
+            return lower.toUpperCase();
+        }
+        if (style === "parenthesized") {
+            return "(" + lower + ")";
+        }
+        throw new Error("Unsupported panel-label style: " + style);
+    }
+
+    var cfg = __SCI_PANEL_LABEL_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var response = "";
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var sourceFile = new File(cfg.input_path);
+        if (!sourceFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+
+        var outputFile = new File(cfg.output_path);
+        if (outputFile.exists) {
+            if (!cfg.overwrite) {
+                throw new Error("Output already exists; set overwrite=true to replace it: " + cfg.output_path);
+            }
+            if (!outputFile.remove()) {
+                throw new Error("Could not remove existing output file: " + cfg.output_path);
+            }
+        }
+
+        doc = app.open(sourceFile);
+        var insetPx = cfg.inset_cm * doc.resolution / 2.54;
+        var fontSizePx = cfg.size_pt * doc.resolution / 72.0;
+        var textColor = new SolidColor();
+        textColor.rgb.red = cfg.color_rgb[0];
+        textColor.rgb.green = cfg.color_rgb[1];
+        textColor.rgb.blue = cfg.color_rgb[2];
+
+        var groupCount = 0;
+        var labelsCreated = 0;
+        var labelNames = [];
+
+        for (var i = 0; i < doc.layerSets.length; i++) {
+            var panelGroup = doc.layerSets[i];
+            var prefix = "Group_Panel_";
+            if (panelGroup.name.indexOf(prefix) !== 0) {
+                continue;
+            }
+
+            var panelId = panelGroup.name.substring(prefix.length);
+            if (!/^[a-z]+$/i.test(panelId)) {
+                throw new Error("Invalid panel group name: " + panelGroup.name);
+            }
+
+            groupCount++;
+            var labelLayerName = "Panel_Label_" + panelId.toLowerCase();
+
+            for (var existingIndex = 0; existingIndex < panelGroup.artLayers.length; existingIndex++) {
+                if (panelGroup.artLayers[existingIndex].name === labelLayerName) {
+                    throw new Error(
+                        "A generated panel label already exists in " + panelGroup.name +
+                        "; use the original unlabeled PSD as input."
+                    );
+                }
+            }
+
+            var groupBounds = panelGroup.bounds;
+            var left = px(groupBounds[0]);
+            var top = px(groupBounds[1]);
+            var right = px(groupBounds[2]);
+            var bottom = px(groupBounds[3]);
+            if (!(right > left && bottom > top)) {
+                throw new Error("Panel group has empty bounds: " + panelGroup.name);
+            }
+
+            var textLayer = panelGroup.artLayers.add();
+            textLayer.kind = LayerKind.TEXT;
+            textLayer.name = labelLayerName;
+
+            var textItem = textLayer.textItem;
+            textItem.contents = labelFor(panelId, cfg.style);
+            textItem.font = cfg.font_postscript;
+            textItem.size = new UnitValue(cfg.size_pt, "pt");
+            textItem.color = textColor;
+            textItem.justification = Justification.LEFT;
+            textItem.position = [
+                new UnitValue(left + insetPx, "px"),
+                new UnitValue(top + insetPx + fontSizePx, "px")
+            ];
+
+            if (textLayer.kind !== LayerKind.TEXT) {
+                throw new Error("Photoshop did not create an editable text layer for " + panelGroup.name);
+            }
+
+            labelsCreated++;
+            labelNames.push(panelGroup.name + "=" + textItem.contents);
+        }
+
+        if (groupCount < 1) {
+            throw new Error("No Group_Panel_* groups were found in the input PSD.");
+        }
+        if (labelsCreated !== groupCount) {
+            throw new Error("Not every panel group received exactly one text label.");
+        }
+
+        var psdOptions = new PhotoshopSaveOptions();
+        psdOptions.embedColorProfile = true;
+        psdOptions.maximizeCompatibility = true;
+        doc.saveAs(outputFile, psdOptions, true, Extension.LOWERCASE);
+
+        if (!outputFile.exists || outputFile.length <= 0) {
+            throw new Error("Photoshop did not create a non-empty labeled PSD.");
+        }
+
+        response = [
+            "SCI_PS_LABELS",
+            "OK",
+            clean(doc.name),
+            String(groupCount),
+            String(labelsCreated),
+            cfg.style,
+            labelNames.join(","),
+            outputFile.fsName
+        ].join("\t");
+
+    } catch (e) {
+        response = [
+            "SCI_PS_LABELS",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreError) {}
+        }
+        app.displayDialogs = previousDialogs;
+    }
+
+    return response;
+})();
+"""
+    return template.replace("__SCI_PANEL_LABEL_CONFIG__", payload)
+
+
+def add_panel_labels(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    style: str = "lowercase",
+    size_pt: float = 10.0,
+    font_postscript: str = "Arial-BoldMT",
+    inset_cm: float = 0.1,
+    color_hex: str = "#000000",
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Add editable Arial Bold panel labels and save to a separate PSD.
+
+    The source PSD is opened read-only from the caller's perspective and is
+    never saved in place. The output is a new PSD containing native Photoshop
+    text layers named Panel_Label_<id> inside the corresponding panel groups.
+    """
+    if style not in PANEL_LABEL_STYLES:
+        raise ValueError(
+            "style must be one of: " + ", ".join(PANEL_LABEL_STYLES)
+        )
+    if not 10.0 <= float(size_pt) <= 12.0:
+        raise ValueError("size_pt must be between 10 and 12 points.")
+    if not isinstance(font_postscript, str) or not font_postscript.strip():
+        raise ValueError("font_postscript must be a non-empty Photoshop PostScript font name.")
+    if any(char in font_postscript for char in "\r\n\t"):
+        raise ValueError("font_postscript cannot contain tabs or newlines.")
+    if float(inset_cm) < 0:
+        raise ValueError("inset_cm cannot be negative.")
+
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".psd":
+        raise ValueError("output_path must end in .psd.")
+    if str(source_file).casefold() == str(output_file).casefold():
+        raise ValueError("output_path must differ from input_path; the source PSD is never modified.")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if output_file.exists() and not overwrite:
+        raise FileExistsError(
+            "Output already exists; pass overwrite=True to replace it: "
+            + str(output_file)
+        )
+
+    color_rgb = _parse_hex_color(color_hex)
+    config = {
+        "input_path": str(source_file),
+        "output_path": str(output_file),
+        "style": style,
+        "size_pt": float(size_pt),
+        "font_postscript": font_postscript.strip(),
+        "inset_cm": float(inset_cm),
+        "color_rgb": list(color_rgb),
+        "overwrite": bool(overwrite),
+    }
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    jsx = _build_add_panel_labels_jsx(config)
+    raw = active_bridge.execute_jsx(jsx)
+    fields = _parse_protocol(
+        raw,
+        "SCI_PS_LABELS",
+        8,
+        "add_panel_labels",
+        jsx,
+    )
+
+    group_count = int(fields[3])
+    labels_created = int(fields[4])
+    if group_count < 1 or labels_created != group_count:
+        raise PhotoshopBridgeError(
+            "add_panel_labels",
+            "Photoshop did not create exactly one label for every panel group: "
+            + repr(fields[3:6]),
+            exception_type="PanelLabelCountMismatch",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    if not output_file.is_file() or output_file.stat().st_size <= 0:
+        raise PhotoshopBridgeError(
+            "add_panel_labels",
+            "Photoshop reported a save but the labeled PSD is missing or empty: "
+            + str(output_file),
+            exception_type="PsdSaveVerificationError",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    return {
+        "document_name": fields[2],
+        "panel_group_count": group_count,
+        "labels_created": labels_created,
+        "style": fields[5],
+        "labels": fields[6].split(",") if fields[6] else [],
+        "input_psd": str(source_file),
+        "saved_psd": str(output_file),
+        "font_postscript": config["font_postscript"],
+        "font_size_pt": config["size_pt"],
+        "color_hex": color_hex.upper(),
+        "passed": True,
+    }
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
@@ -980,7 +1295,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -1014,6 +1329,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap-cm", type=float, default=0.2)
     parser.add_argument("--align", choices=("center", "top-left"), default="center")
     parser.add_argument("--auto-trim", action="store_true")
+    parser.add_argument(
+        "--input-psd",
+        type=Path,
+        help="Input PSD for --action add-panel-labels; source is never modified.",
+    )
+    parser.add_argument(
+        "--label-style",
+        choices=PANEL_LABEL_STYLES,
+        default="lowercase",
+        help="Panel label style for --action add-panel-labels.",
+    )
+    parser.add_argument("--font-postscript", default="Arial-BoldMT")
+    parser.add_argument("--font-size-pt", type=float, default=10.0)
+    parser.add_argument("--label-inset-cm", type=float, default=0.1)
+    parser.add_argument("--label-color", default="#000000")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--json",
@@ -1045,6 +1375,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.action == "lock-units":
             result = bridge.lock_units()
             result["passed"] = True
+        elif args.action == "add-panel-labels":
+            if args.input_psd is None or args.output is None:
+                print(
+                    "ERROR: --input-psd and --output are required for "
+                    "--action add-panel-labels.",
+                    file=sys.stderr,
+                )
+                return 2
+            result = add_panel_labels(
+                args.input_psd,
+                args.output,
+                style=args.label_style,
+                size_pt=args.font_size_pt,
+                font_postscript=args.font_postscript,
+                inset_cm=args.label_inset_cm,
+                color_hex=args.label_color,
+                overwrite=args.overwrite,
+                bridge=bridge,
+            )
         elif args.action == "compose-grid":
             result = compose_grid(
                 args.image or [],
