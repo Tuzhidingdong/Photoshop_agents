@@ -7075,7 +7075,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
     try:
-        bridge = PhotoshopBridge(execution_mode=args.execution_mode)
+        photoshop_required_actions = {
+            "diagnose",
+            "status",
+            "lock-units",
+            "exec-jsx",
+            "compose-grid",
+            "add-panel-labels",
+            "add-scale-bar",
+            "unify-fonts",
+            "export-figure",
+            "preflight-figure",
+            "inspect-psd",
+            "apply-organize-plan",
+            "preview-psd-layers",
+        }
+        bridge = (
+            PhotoshopBridge(execution_mode=args.execution_mode)
+            if args.action in photoshop_required_actions
+            else None
+        )
 
         if args.action == "diagnose":
             result = bridge.diagnose()
