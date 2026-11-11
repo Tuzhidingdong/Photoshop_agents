@@ -1507,17 +1507,36 @@ def _build_add_scale_bar_jsx(config: Dict[str, Any]) -> str:
             throw new Error("Photoshop did not create an editable scale-label text layer.");
         }
 
+        // Photoshop's textItem.position is a typographic anchor/baseline, not
+        // the visible glyph bounds. Read the actual text-layer bounds first,
+        // then translate the layer so its visible lower-right corner aligns
+        // with the requested gap above the scale bar.
         var textBounds = textLayer.bounds;
         var labelLeft = px(textBounds[0]);
         var labelTop = px(textBounds[1]);
         var labelRight = px(textBounds[2]);
         var labelBottom = px(textBounds[3]);
+        var labelTargetRight = innerRight;
+        var labelTargetBottom = barTop - labelGapPx;
 
-        if (labelLeft < panelInnerLeft || labelRight > imageRight - insetPx ||
-            labelTop < panelInnerTop || labelBottom > barTop) {
+        textLayer.translate(
+            labelTargetRight - labelRight,
+            labelTargetBottom - labelBottom
+        );
+
+        textBounds = textLayer.bounds;
+        labelLeft = px(textBounds[0]);
+        labelTop = px(textBounds[1]);
+        labelRight = px(textBounds[2]);
+        labelBottom = px(textBounds[3]);
+
+        if (labelLeft < panelInnerLeft - 0.5 ||
+            labelRight > imageRight - insetPx + 0.5 ||
+            labelTop < panelInnerTop - 0.5 ||
+            labelBottom > barTop - labelGapPx + 0.5) {
             throw new Error(
-                "Scale label does not fit above the bar inside the selected panel; " +
-                "use a shorter label or smaller label size."
+                "Scale label cannot be fitted above the bar inside the selected panel; " +
+                "use a shorter label, smaller font, or wider panel."
             );
         }
 
