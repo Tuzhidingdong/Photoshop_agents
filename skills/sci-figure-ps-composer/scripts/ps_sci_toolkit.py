@@ -1261,6 +1261,471 @@ def add_panel_labels(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: editable scale bars
+# ---------------------------------------------------------------------------
+
+SCALE_BAR_MODES = ("pixels", "physical")
+
+
+def _format_scale_number(value: float) -> str:
+    """Format scale values compactly without unnecessary trailing zeros."""
+    return format(float(value), ".8g")
+
+
+def _build_add_scale_bar_jsx(config: Dict[str, Any]) -> str:
+    """Build JSX that adds separate editable bar/outline/text layers."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function px(value) {
+        return value.as("px");
+    }
+    function makeColor(rgb) {
+        var color = new SolidColor();
+        color.rgb.red = rgb[0];
+        color.rgb.green = rgb[1];
+        color.rgb.blue = rgb[2];
+        return color;
+    }
+    function fillRectangle(parentDoc, targetGroup, name, left, top, right, bottom, color) {
+        if (!(right > left && bottom > top)) {
+            throw new Error("Invalid scale-bar rectangle bounds for " + name);
+        }
+        var layer = targetGroup.artLayers.add();
+        layer.name = name;
+        layer.kind = LayerKind.NORMAL;
+        parentDoc.activeLayer = layer;
+        parentDoc.selection.select([
+            [left, top],
+            [right, top],
+            [right, bottom],
+            [left, bottom]
+        ]);
+        parentDoc.selection.fill(color, ColorBlendMode.NORMAL, 100, false);
+        parentDoc.selection.deselect();
+        return layer;
+    }
+
+    var cfg = __SCI_SCALE_BAR_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var smartDoc = null;
+    var sourceWidthPx = 0;
+    var sourceHeightPx = 0;
+    var measuredScale = 0;
+    var barWidthPx = 0;
+    var response = "";
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var sourceFile = new File(cfg.input_path);
+        if (!sourceFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+
+        var outputFile = new File(cfg.output_path);
+        if (outputFile.exists) {
+            if (!cfg.overwrite) {
+                throw new Error("Output already exists; set overwrite=true to replace it: " + cfg.output_path);
+            }
+            if (!outputFile.remove()) {
+                throw new Error("Could not remove existing output file: " + cfg.output_path);
+            }
+        }
+
+        doc = app.open(sourceFile);
+        var targetGroup = null;
+        var expectedGroupName = "Group_Panel_" + cfg.panel_id.toLowerCase();
+
+        for (var groupIndex = 0; groupIndex < doc.layerSets.length; groupIndex++) {
+            if (doc.layerSets[groupIndex].name.toLowerCase() === expectedGroupName.toLowerCase()) {
+                targetGroup = doc.layerSets[groupIndex];
+                break;
+            }
+        }
+        if (targetGroup === null) {
+            throw new Error("Panel group not found: " + expectedGroupName);
+        }
+
+        var smartLayer = null;
+        for (var layerIndex = 0; layerIndex < targetGroup.artLayers.length; layerIndex++) {
+            var candidate = targetGroup.artLayers[layerIndex];
+            if (candidate.name.indexOf("Image_Panel_") === 0 &&
+                candidate.kind == LayerKind.SMARTOBJECT) {
+                smartLayer = candidate;
+                break;
+            }
+        }
+        if (smartLayer === null) {
+            throw new Error("Embedded Smart Object not found in " + expectedGroupName);
+        }
+
+        var imageBounds = smartLayer.bounds;
+        var imageLeft = px(imageBounds[0]);
+        var imageTop = px(imageBounds[1]);
+        var imageRight = px(imageBounds[2]);
+        var imageBottom = px(imageBounds[3]);
+        var displayedImageWidth = imageRight - imageLeft;
+        var displayedImageHeight = imageBottom - imageTop;
+        if (!(displayedImageWidth > 0 && displayedImageHeight > 0)) {
+            throw new Error("Panel Smart Object has empty on-canvas bounds.");
+        }
+
+        if (cfg.mode === "physical") {
+            doc.activeLayer = smartLayer;
+            executeAction(
+                stringIDToTypeID("placedLayerEditContents"),
+                new ActionDescriptor(),
+                DialogModes.NO
+            );
+            smartDoc = app.activeDocument;
+            sourceWidthPx = px(smartDoc.width);
+            sourceHeightPx = px(smartDoc.height);
+            if (!(sourceWidthPx > 0 && sourceHeightPx > 0)) {
+                throw new Error("Smart Object content has invalid pixel dimensions.");
+            }
+            smartDoc.close(SaveOptions.DONOTSAVECHANGES);
+            smartDoc = null;
+            app.activeDocument = doc;
+
+            // Use the actual post-trim Smart Object dimensions and on-canvas
+            // transform; do not assume the source raster fills the PSD cell.
+            measuredScale = displayedImageWidth / sourceWidthPx;
+            barWidthPx = (cfg.physical_length / cfg.pixel_size) * measuredScale;
+        } else if (cfg.mode === "pixels") {
+            barWidthPx = cfg.bar_width_px;
+            sourceWidthPx = 0;
+            sourceHeightPx = 0;
+            measuredScale = 1;
+        } else {
+            throw new Error("Unsupported scale-bar mode: " + cfg.mode);
+        }
+
+        if (!(barWidthPx >= 1)) {
+            throw new Error("Calculated scale-bar width is less than one canvas pixel.");
+        }
+
+        var docResolution = doc.resolution;
+        var insetPx = cfg.inset_cm * docResolution / 2.54;
+        var barHeightPx = cfg.bar_height_pt * docResolution / 72.0;
+        var outlinePx = cfg.outline_rgb !== null ? cfg.outline_width_pt * docResolution / 72.0 : 0;
+        var labelGapPx = cfg.label_gap_pt * docResolution / 72.0;
+
+        var innerRight = imageRight - insetPx - outlinePx;
+        var innerBottom = imageBottom - insetPx - outlinePx;
+        var barLeft = innerRight - barWidthPx;
+        var barTop = innerBottom - barHeightPx;
+        var panelInnerLeft = imageLeft + insetPx + outlinePx;
+        var panelInnerTop = imageTop + insetPx + outlinePx;
+
+        if (barLeft < panelInnerLeft || barTop < panelInnerTop) {
+            throw new Error(
+                "Scale bar does not fit inside " + expectedGroupName +
+                "; reduce the width or inset."
+            );
+        }
+
+        var barColor = makeColor(cfg.color_rgb);
+        var outerBounds = {
+            left: barLeft - outlinePx,
+            top: barTop - outlinePx,
+            right: innerRight + outlinePx,
+            bottom: innerBottom + outlinePx
+        };
+
+        if (cfg.outline_rgb !== null) {
+            fillRectangle(
+                doc,
+                targetGroup,
+                "Scale_Bar_Outline_" + cfg.panel_id.toLowerCase(),
+                outerBounds.left,
+                outerBounds.top,
+                outerBounds.right,
+                outerBounds.bottom,
+                makeColor(cfg.outline_rgb)
+            );
+        }
+
+        fillRectangle(
+            doc,
+            targetGroup,
+            "Scale_Bar_" + cfg.panel_id.toLowerCase(),
+            barLeft,
+            barTop,
+            innerRight,
+            innerBottom,
+            barColor
+        );
+
+        var textLayer = targetGroup.artLayers.add();
+        textLayer.kind = LayerKind.TEXT;
+        textLayer.name = "Scale_Label_" + cfg.panel_id.toLowerCase();
+        var textItem = textLayer.textItem;
+        textItem.contents = cfg.label;
+        textItem.font = cfg.font_postscript;
+        textItem.size = new UnitValue(cfg.label_size_pt, "pt");
+        textItem.color = barColor;
+        textItem.justification = Justification.RIGHT;
+        textItem.position = [
+            new UnitValue(innerRight, "px"),
+            new UnitValue(barTop - labelGapPx, "px")
+        ];
+
+        if (textLayer.kind !== LayerKind.TEXT) {
+            throw new Error("Photoshop did not create an editable scale-label text layer.");
+        }
+
+        var textBounds = textLayer.bounds;
+        var labelLeft = px(textBounds[0]);
+        var labelTop = px(textBounds[1]);
+        var labelRight = px(textBounds[2]);
+        var labelBottom = px(textBounds[3]);
+
+        if (labelLeft < panelInnerLeft || labelRight > imageRight - insetPx ||
+            labelTop < panelInnerTop || labelBottom > barTop) {
+            throw new Error(
+                "Scale label does not fit above the bar inside the selected panel; " +
+                "use a shorter label or smaller label size."
+            );
+        }
+
+        var psdOptions = new PhotoshopSaveOptions();
+        psdOptions.embedColorProfile = true;
+        psdOptions.maximizeCompatibility = true;
+        doc.saveAs(outputFile, psdOptions, true, Extension.LOWERCASE);
+
+        if (!outputFile.exists || outputFile.length <= 0) {
+            throw new Error("Photoshop did not create a non-empty scale-bar PSD.");
+        }
+
+        response = [
+            "SCI_PS_SCALE_BAR",
+            "OK",
+            clean(doc.name),
+            cfg.panel_id.toLowerCase(),
+            cfg.mode,
+            String(barWidthPx),
+            clean(cfg.label),
+            String(sourceWidthPx),
+            String(sourceHeightPx),
+            String(measuredScale),
+            String(cfg.outline_rgb !== null),
+            outputFile.fsName
+        ].join("\t");
+
+    } catch (e) {
+        response = [
+            "SCI_PS_SCALE_BAR",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (smartDoc !== null) {
+            try {
+                smartDoc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (smartCloseError) {}
+        }
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (docCloseError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreError) {}
+        }
+        app.displayDialogs = previousDialogs;
+    }
+
+    return response;
+})();
+"""
+    return template.replace("__SCI_SCALE_BAR_CONFIG__", payload)
+
+
+def add_scale_bar(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    panel_id: str = "a",
+    mode: str = "pixels",
+    bar_width_px: Optional[float] = None,
+    physical_length: Optional[float] = None,
+    pixel_size: Optional[float] = None,
+    unit: Optional[str] = None,
+    label: Optional[str] = None,
+    color_hex: str = "#000000",
+    outline_hex: Optional[str] = None,
+    bar_height_pt: float = 2.0,
+    outline_width_pt: float = 0.5,
+    label_size_pt: float = 8.0,
+    label_gap_pt: float = 1.5,
+    font_postscript: str = "ArialMT",
+    inset_cm: float = 0.2,
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Add an editable scale bar to one panel and save a separate PSD.
+
+    mode='pixels' uses an explicit width measured in final document pixels.
+    mode='physical' converts a requested physical length using pixel_size
+    (physical units per pixel in the source Smart Object) and the actual
+    post-trim Smart Object dimensions/on-canvas transform.
+    """
+    normalized_panel = str(panel_id).strip().lower()
+    if not normalized_panel or not normalized_panel.isalpha():
+        raise ValueError("panel_id must contain letters only, for example 'a' or 'aa'.")
+    if mode not in SCALE_BAR_MODES:
+        raise ValueError("mode must be 'pixels' or 'physical'.")
+
+    if mode == "pixels":
+        if bar_width_px is None or float(bar_width_px) <= 0:
+            raise ValueError("bar_width_px must be greater than zero in pixel mode.")
+        if physical_length is not None or pixel_size is not None or unit is not None:
+            raise ValueError("Physical calibration arguments cannot be used in pixel mode.")
+        selected_width = float(bar_width_px)
+        default_label = _format_scale_number(selected_width) + " px"
+    else:
+        if physical_length is None or float(physical_length) <= 0:
+            raise ValueError("physical_length must be greater than zero in physical mode.")
+        if pixel_size is None or float(pixel_size) <= 0:
+            raise ValueError("pixel_size must be greater than zero in physical mode.")
+        if unit is None or not str(unit).strip():
+            raise ValueError("unit is required in physical mode, for example 'µm'.")
+        if bar_width_px is not None:
+            raise ValueError("bar_width_px cannot be used in physical mode.")
+        selected_width = None
+        default_label = _format_scale_number(float(physical_length)) + " " + str(unit).strip()
+
+    selected_label = default_label if label is None else str(label)
+    if not selected_label.strip():
+        raise ValueError("label cannot be empty.")
+    if any(ord(char) < 32 for char in selected_label):
+        raise ValueError("label cannot contain tabs, newlines, or control characters.")
+    if len(selected_label) > 80:
+        raise ValueError("label cannot exceed 80 characters.")
+
+    if not 1.0 <= float(bar_height_pt) <= 12.0:
+        raise ValueError("bar_height_pt must be between 1 and 12 points.")
+    if not 5.0 <= float(label_size_pt) <= 12.0:
+        raise ValueError("label_size_pt must be between 5 and 12 points.")
+    if float(label_gap_pt) < 0:
+        raise ValueError("label_gap_pt cannot be negative.")
+    if float(inset_cm) < 0:
+        raise ValueError("inset_cm cannot be negative.")
+    if float(outline_width_pt) <= 0:
+        raise ValueError("outline_width_pt must be greater than zero.")
+    if not isinstance(font_postscript, str) or not font_postscript.strip():
+        raise ValueError("font_postscript must be a non-empty Photoshop PostScript font name.")
+    if any(char in font_postscript for char in "\r\n\t"):
+        raise ValueError("font_postscript cannot contain tabs or newlines.")
+
+    bar_rgb = _parse_hex_color(color_hex)
+    if bar_rgb not in ((0, 0, 0), (255, 255, 255)):
+        raise ValueError("color_hex must be black (#000000) or white (#FFFFFF).")
+    if outline_hex is None:
+        outline_rgb = None
+    else:
+        outline_rgb = _parse_hex_color(outline_hex)
+        if outline_rgb == bar_rgb:
+            raise ValueError("outline_hex must contrast with the bar color.")
+
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".psd":
+        raise ValueError("output_path must end in .psd.")
+    if str(source_file).casefold() == str(output_file).casefold():
+        raise ValueError("output_path must differ from input_path; the source PSD is never modified.")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if output_file.exists() and not overwrite:
+        raise FileExistsError(
+            "Output already exists; pass overwrite=True to replace it: "
+            + str(output_file)
+        )
+
+    config = {
+        "input_path": str(source_file),
+        "output_path": str(output_file),
+        "panel_id": normalized_panel,
+        "mode": mode,
+        "bar_width_px": selected_width,
+        "physical_length": float(physical_length) if physical_length is not None else None,
+        "pixel_size": float(pixel_size) if pixel_size is not None else None,
+        "unit": str(unit).strip() if unit is not None else None,
+        "label": selected_label,
+        "color_rgb": list(bar_rgb),
+        "outline_hex": outline_hex.upper() if outline_hex is not None else None,
+        "outline_rgb": list(outline_rgb) if outline_rgb is not None else None,
+        "bar_height_pt": float(bar_height_pt),
+        "outline_width_pt": float(outline_width_pt),
+        "label_size_pt": float(label_size_pt),
+        "label_gap_pt": float(label_gap_pt),
+        "font_postscript": font_postscript.strip(),
+        "inset_cm": float(inset_cm),
+        "overwrite": bool(overwrite),
+    }
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    jsx = _build_add_scale_bar_jsx(config)
+    raw = active_bridge.execute_jsx(jsx)
+    fields = _parse_protocol(
+        raw,
+        "SCI_PS_SCALE_BAR",
+        12,
+        "add_scale_bar",
+        jsx,
+    )
+
+    saved_width = float(fields[5])
+    if saved_width < 1:
+        raise PhotoshopBridgeError(
+            "add_scale_bar",
+            "Photoshop returned an invalid scale-bar width: " + fields[5],
+            exception_type="InvalidScaleBarWidth",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+    if not output_file.is_file() or output_file.stat().st_size <= 0:
+        raise PhotoshopBridgeError(
+            "add_scale_bar",
+            "Photoshop reported a save but the scale-bar PSD is missing or empty: "
+            + str(output_file),
+            exception_type="PsdSaveVerificationError",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    return {
+        "document_name": fields[2],
+        "panel_id": fields[3],
+        "mode": fields[4],
+        "bar_width_px": saved_width,
+        "label": fields[6],
+        "smart_object_width_px": int(float(fields[7])),
+        "smart_object_height_px": int(float(fields[8])),
+        "displayed_pixels_per_source_pixel": float(fields[9]),
+        "outline": fields[10].lower() == "true",
+        "input_psd": str(source_file),
+        "saved_psd": str(output_file),
+        "color_hex": color_hex.upper(),
+        "outline_hex": outline_hex.upper() if outline_hex is not None else None,
+        "passed": True,
+    }
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
@@ -1295,7 +1760,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -1344,6 +1809,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--font-size-pt", type=float, default=10.0)
     parser.add_argument("--label-inset-cm", type=float, default=0.1)
     parser.add_argument("--label-color", default="#000000")
+    parser.add_argument(
+        "--panel-id",
+        default="a",
+        help="Panel group identifier for --action add-scale-bar.",
+    )
+    parser.add_argument(
+        "--scale-mode",
+        choices=SCALE_BAR_MODES,
+        default="pixels",
+        help="Scale-bar width mode: pixels or calibrated physical length.",
+    )
+    parser.add_argument("--bar-width-px", type=float)
+    parser.add_argument("--scale-length", type=float)
+    parser.add_argument("--pixel-size", type=float)
+    parser.add_argument("--scale-unit")
+    parser.add_argument("--scale-label")
+    parser.add_argument("--bar-color", default="#000000")
+    parser.add_argument("--bar-outline")
+    parser.add_argument("--bar-height-pt", type=float, default=2.0)
+    parser.add_argument("--outline-width-pt", type=float, default=0.5)
+    parser.add_argument("--scale-label-size-pt", type=float, default=8.0)
+    parser.add_argument("--scale-label-gap-pt", type=float, default=1.5)
+    parser.add_argument("--scale-inset-cm", type=float, default=0.2)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--json",
@@ -1371,6 +1859,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
+    if args.action == "add-scale-bar":
+        if args.input_psd is None or args.output is None:
+            print(
+                "ERROR: --input-psd and --output are required for "
+                "--action add-scale-bar.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.scale_mode == "pixels" and args.bar_width_px is None:
+            print("ERROR: --bar-width-px is required in pixel mode.", file=sys.stderr)
+            return 2
+        if args.scale_mode == "physical" and (
+            args.scale_length is None or args.pixel_size is None or not args.scale_unit
+        ):
+            print(
+                "ERROR: --scale-length, --pixel-size, and --scale-unit "
+                "are required in physical mode.",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         bridge = PhotoshopBridge()
@@ -1392,6 +1900,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                 font_postscript=args.font_postscript,
                 inset_cm=args.label_inset_cm,
                 color_hex=args.label_color,
+                overwrite=args.overwrite,
+                bridge=bridge,
+            )
+        elif args.action == "add-scale-bar":
+            result = add_scale_bar(
+                args.input_psd,
+                args.output,
+                panel_id=args.panel_id,
+                mode=args.scale_mode,
+                bar_width_px=args.bar_width_px,
+                physical_length=args.scale_length,
+                pixel_size=args.pixel_size,
+                unit=args.scale_unit,
+                label=args.scale_label,
+                color_hex=args.bar_color,
+                outline_hex=args.bar_outline,
+                bar_height_pt=args.bar_height_pt,
+                outline_width_pt=args.outline_width_pt,
+                label_size_pt=args.scale_label_size_pt,
+                label_gap_pt=args.scale_label_gap_pt,
+                inset_cm=args.scale_inset_cm,
                 overwrite=args.overwrite,
                 bridge=bridge,
             )
