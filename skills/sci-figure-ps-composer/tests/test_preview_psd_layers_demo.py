@@ -27,7 +27,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-psd", type=Path, required=True)
     parser.add_argument("--preview-dir", type=Path, required=True)
-    parser.add_argument("--max-previews", type=int, default=12)
+    parser.add_argument("--max-previews", type=int, default=200)
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Allow a deliberately partial visual index; default requires every non-background node.",
+    )
     parser.add_argument("--thumbnail-width-px", type=int, default=512)
     parser.add_argument("--execution-mode", choices=("quiet", "interactive"), default="quiet")
     args = parser.parse_args()
@@ -45,6 +50,13 @@ def main() -> int:
         raise RuntimeError("The PSD has no non-background layers to preview.")
 
     selected = candidates[: min(len(candidates), args.max_previews)]
+    if not args.allow_partial and len(selected) != len(candidates):
+        raise RuntimeError(
+            "Full visual coverage is required by default: "
+            + str(len(candidates)) + " non-background nodes exist, but --max-previews "
+            + str(args.max_previews) + " would preview only " + str(len(selected))
+            + ". Increase --max-previews or explicitly pass --allow-partial."
+        )
     result = preview_psd_layers(
         source,
         args.preview_dir,
@@ -70,6 +82,16 @@ def main() -> int:
     ]
     if not successful:
         raise RuntimeError("No individual layer preview succeeded.")
+    if not args.allow_partial:
+        expected_keys = {layer["node_key"] for layer in candidates}
+        actual_keys = {preview["node_key"] for preview in result["previews"]}
+        if actual_keys != expected_keys:
+            raise RuntimeError("Full visual coverage failed: preview node keys do not match the PSD.")
+        if result["failed_count"] != 0:
+            raise RuntimeError(
+                "Full visual coverage failed: "
+                + str(result["failed_count"]) + " individual preview(s) failed."
+            )
 
     after = sha256(source)
     if before != after or not result["source_sha256_unchanged"]:
@@ -80,6 +102,8 @@ def main() -> int:
         "input_psd": str(source),
         "layer_tree_sha256": inspection["layer_tree_sha256"],
         "selected_layer_count": len(selected),
+        "eligible_non_background_node_count": len(candidates),
+        "full_layer_coverage": len(selected) == len(candidates) and result["failed_count"] == 0,
         "successful_preview_count": result["successful_count"],
         "failed_preview_count": result["failed_count"],
         "composite_preview": str(composite),
@@ -89,6 +113,7 @@ def main() -> int:
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print("STAGE9_PREVIEW_PSD_LAYERS_REAL_PHOTOSHOP_TEST=PASS")
+    print("STAGE9_FULL_LAYER_COVERAGE=" + ("PASS" if report["full_layer_coverage"] else "PARTIAL"))
     return 0
 
 
