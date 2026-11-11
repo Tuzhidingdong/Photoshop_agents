@@ -4110,6 +4110,7 @@ def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
         "document": None,
         "layers": [],
         "layer_count": 0,
+        "previews": [],
     }
 
     def number(value: str, default: Optional[float] = None) -> Optional[float]:
@@ -4139,6 +4140,15 @@ def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
                 "mode": values[5],
                 "color_profile": values[6],
             }
+        elif values[0] == "PREVIEW":
+            if len(values) != 5:
+                raise ValueError("Invalid PREVIEW inspection record: " + repr(values))
+            parsed["previews"].append({
+                "node_key": values[1],
+                "status": values[2],
+                "path": values[3] or None,
+                "description": values[4],
+            })
         elif values[0] == "LAYER":
             if len(values) != 25:
                 raise ValueError(
@@ -4221,6 +4231,9 @@ def inspect_psd(
     input_path: str | Path,
     *,
     report_path: Optional[str | Path] = None,
+    preview_dir: Optional[str | Path] = None,
+    preview_max_layers: int = 12,
+    preview_max_dimension: int = 1400,
     bridge: Optional[PhotoshopBridge] = None,
 ) -> Dict[str, Any]:
     """Inspect an existing PSD read-only and return its full ordered layer tree."""
@@ -4239,6 +4252,20 @@ def inspect_psd(
                 + str(report_file)
             )
         report_file.parent.mkdir(parents=True, exist_ok=True)
+
+    preview_folder: Optional[Path] = None
+    if preview_dir is not None:
+        preview_folder = Path(preview_dir).expanduser().resolve()
+        if preview_folder.exists():
+            raise FileExistsError(
+                "Preview directory already exists; choose a new path: "
+                + str(preview_folder)
+            )
+        if not isinstance(preview_max_layers, int) or not 0 <= preview_max_layers <= 200:
+            raise ValueError("preview_max_layers must be an integer between 0 and 200.")
+        if not isinstance(preview_max_dimension, int) or not 128 <= preview_max_dimension <= 4000:
+            raise ValueError("preview_max_dimension must be an integer between 128 and 4000.")
+        preview_folder.parent.mkdir(parents=True, exist_ok=True)
 
     source_hash_before = _sha256_file(source_file)
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
@@ -4261,6 +4288,9 @@ def inspect_psd(
         jsx = _build_inspect_psd_jsx({
             "input_path": str(temp_input),
             "document_label": source_file.name,
+            "preview_dir": str(preview_folder) if preview_folder is not None else "",
+            "preview_max_layers": preview_max_layers,
+            "preview_max_dimension": preview_max_dimension,
         })
         raw = active_bridge.execute_jsx(jsx)
         protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
@@ -4325,8 +4355,38 @@ def inspect_psd(
                 if layer["kind"] == "LayerKind.SMARTOBJECT"
             ),
             "layers": inspected["layers"],
+            "visual_previews": inspected["previews"],
+            "preview_dir": str(preview_folder) if preview_folder is not None else None,
             "source_sha256_unchanged": True,
         }
+
+        if preview_folder is not None:
+            composite = next(
+                (
+                    item for item in inspected["previews"]
+                    if item["node_key"] == "__composite__"
+                    and item["status"] == "PASS"
+                ),
+                None,
+            )
+            if composite is None or not composite["path"] or not Path(composite["path"]).is_file():
+                raise PhotoshopBridgeError(
+                    "inspect_psd",
+                    "Photoshop did not produce a valid composite visual preview.",
+                    exception_type="PreviewExportVerificationError",
+                    jsx_preview=_clean_jsx_preview(jsx),
+                )
+            for preview in inspected["previews"]:
+                if preview["status"] == "PASS" and (
+                    preview["path"] is None or not Path(preview["path"]).is_file()
+                ):
+                    raise PhotoshopBridgeError(
+                        "inspect_psd",
+                        "Photoshop reported a missing layer preview: "
+                        + str(preview["node_key"]),
+                        exception_type="PreviewExportVerificationError",
+                        jsx_preview=_clean_jsx_preview(jsx),
+                    )
 
         if report_file is not None:
             report["report_path"] = str(report_file)
@@ -4348,6 +4408,12 @@ def inspect_psd(
                 temp_input.unlink()
         except OSError:
             pass
+        if preview_folder is not None and "report" not in locals():
+            try:
+                if preview_folder.exists():
+                    shutil.rmtree(preview_folder)
+            except OSError:
+                pass
 
 
 
