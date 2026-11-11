@@ -1275,6 +1275,28 @@ def _format_scale_number(value: float) -> str:
     return format(float(value), ".8g")
 
 
+def _physical_scale_width_px(
+    physical_length: float,
+    pixel_size: float,
+    displayed_image_width_px: float,
+    smart_object_width_px: float,
+) -> float:
+    """Convert a physical length to the final document-pixel width."""
+    values = (
+        physical_length,
+        pixel_size,
+        displayed_image_width_px,
+        smart_object_width_px,
+    )
+    if any(float(value) <= 0 for value in values):
+        raise ValueError("Physical calibration and image dimensions must be positive.")
+    source_pixels = float(physical_length) / float(pixel_size)
+    displayed_per_source_pixel = (
+        float(displayed_image_width_px) / float(smart_object_width_px)
+    )
+    return source_pixels * displayed_per_source_pixel
+
+
 def _build_add_scale_bar_jsx(config: Dict[str, Any]) -> str:
     """Build JSX that adds separate editable bar/outline/text layers."""
     payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
