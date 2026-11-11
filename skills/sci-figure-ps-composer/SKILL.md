@@ -413,6 +413,36 @@ The template deliberately does not finalize scientific roles based on layer name
 
 The example is illustrative only; a usable report must include every node in the inspection JSON exactly once. A partial Stage 9A preview run can still support metadata-based classifications, but it cannot support `visual_preview` evidence for nodes that were not previewed. Run Stage 9A with a sufficiently high `--preview-max-layers` CLI value (up to 200) when full visual coverage is needed.
 
+### Agent visual-review procedure
+
+When a classification work template is supplied, the agent must perform these steps in order:
+
+1. Verify that the template's source SHA-256 and layer-tree fingerprint match its inspection and preview reports. Stop if any hash differs.
+2. Read the full composite preview first to understand the complete figure and panel arrangement.
+3. Review every non-background node's own isolated preview. Do not treat a contact sheet, layer name, role suggestion, or parent group as a substitute for opening the node's referenced preview.
+4. For a group, inspect its group preview and compare it with its child previews. For a text layer, compare the exact native text contents with its visual placement. For Smart Objects and raster layers, identify what is actually visible, not merely the file/layer label.
+5. Use parent, children, sibling order, geometry, visibility, lock/clipping metadata, and text content as supporting evidence. Separate what is observed from what is inferred.
+6. For every non-background node, fill `classification_seed` with a final allowed `role`, confidence, a substantive rationale, and typed evidence. Set `status: "agent_reviewed"`. Include a `visual_preview` evidence item whose `preview_node_key` is exactly the node's own key and whose observation records what was actually seen in that isolated preview. Use `unknown` when the scientific purpose remains unclear; an explicit unknown is preferable to invented certainty.
+7. Leave the native Background seed as `background` / `metadata_confirmed`. Do not change it based on its localized name or appearance.
+8. Do not create organizer operations while classifying. Classification must not rename, move, hide, reorder, delete, or merge any node.
+
+The `role_suggestion` field is only a navigation hint. The agent may accept, downgrade, or reject it after visual review. It must never be copied blindly into the final classification seed. A candidate marked `test_artifact` should be checked against its text/visual preview and surrounding group; the name alone is not enough to declare that it is safe to remove or hide.
+
+### Finalize a reviewed work template
+
+After all 19 nodes have a final classification seed (18 `agent_reviewed` plus the native Background's `metadata_confirmed`), export and validate a separate classification report:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action finalize-psd-classification-template `
+  --classification-template Figure_legacy_classification_REVIEWED.json `
+  --output Figure_legacy_classification.json `
+  --execution-mode quiet --json
+~~~
+
+Finalization requires complete isolated-preview coverage and a reviewed visual evidence item for every non-background node. It rechecks the current PSD SHA-256, inspection and preview hashes, node inventory, each role/confidence/rationale/evidence record, and then invokes the same strict classification validator used by organizer-plan drafting. It writes a separate classification JSON, never overwrites the work template, and creates no organizer operations. The resulting classification report can then be passed to `validate-psd-classification` or `create-organize-plan-draft`.
+
+The template-finalization, classification-validation, and organizer-plan-draft actions are pure Python/file operations; they do not need to initialize Photoshop COM. Only actual Photoshop document inspection, preview, and apply operations require the desktop Photoshop bridge.
+
 Evidence validation rules:
 
 - `layer_name` must quote the exact inspected layer name.
