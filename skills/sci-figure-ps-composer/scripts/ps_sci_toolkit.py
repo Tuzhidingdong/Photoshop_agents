@@ -1363,6 +1363,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not args.jsx_file.is_file():
             print("ERROR: JSX file does not exist: " + str(args.jsx_file), file=sys.stderr)
             return 2
+    if args.action == "add-panel-labels":
+        if args.input_psd is None or args.output is None:
+            print(
+                "ERROR: --input-psd and --output are required for "
+                "--action add-panel-labels.",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         bridge = PhotoshopBridge()
@@ -1376,13 +1384,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = bridge.lock_units()
             result["passed"] = True
         elif args.action == "add-panel-labels":
-            if args.input_psd is None or args.output is None:
-                print(
-                    "ERROR: --input-psd and --output are required for "
-                    "--action add-panel-labels.",
-                    file=sys.stderr,
-                )
-                return 2
             result = add_panel_labels(
                 args.input_psd,
                 args.output,
