@@ -3819,6 +3819,10 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
     var doc = null;
     var rows = [];
     var layerCount = 0;
+    var layerMap = {};
+    var parentMap = {};
+    var visibleMap = {};
+    var previewCandidates = [];
 
     try {
         app.displayDialogs = DialogModes.NO;
@@ -3878,6 +3882,18 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
                     layerPath
                 ]));
                 layerCount++;
+                layerMap[nodeKey] = layer;
+                parentMap[nodeKey] = parentKey;
+                visibleMap[nodeKey] = Boolean(safeProperty(layer, "visible", true));
+                if (!isGroup && visibleMap[nodeKey] &&
+                    kind !== "LayerKind.SMARTOBJECT" &&
+                    kind !== "LayerKind.TEXT" &&
+                    kind.indexOf("LayerKind.") === 0) {
+                    previewCandidates.push(nodeKey);
+                } else if (!isGroup && visibleMap[nodeKey] &&
+                    (kind === "LayerKind.SMARTOBJECT" || kind === "LayerKind.TEXT")) {
+                    previewCandidates.push(nodeKey);
+                }
 
                 if (isGroup) {
                     walk(layer, nodeKey, layerPath, depth + 1);
@@ -3887,6 +3903,171 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
 
         walk(doc, "root", cfg.document_label, 0);
         rows.unshift(encodeRecord(["COUNT", layerCount]));
+
+        function hideAll(container) {
+            var collection = container.layers;
+            for (var h = 0; h < collection.length; h++) {
+                var hiddenLayer = collection[h];
+                hiddenLayer.visible = false;
+                if (hiddenLayer.typename === "LayerSet") {
+                    hideAll(hiddenLayer);
+                }
+            }
+        }
+        function restoreVisibility(container, parentKey) {
+            var collection = container.layers;
+            for (var r = 0; r < collection.length; r++) {
+                var restoredLayer = collection[r];
+                var isGroup = restoredLayer.typename === "LayerSet";
+                var key = parentKey + "/" + (isGroup ? "G" : "L") + r;
+                restoredLayer.visible = visibleMap[key] === true;
+                if (isGroup) {
+                    restoreVisibility(restoredLayer, key);
+                }
+            }
+        }
+        function showTargetAndAncestors(container, key) {
+            var target = layerMap[key];
+            if (target === undefined) {
+                throw new Error("Preview target layer no longer exists: " + key);
+            }
+            target.visible = true;
+            var parent = parentMap[key];
+            while (parent !== undefined && parent !== "root") {
+                if (layerMap[parent] === undefined) {
+                    throw new Error("Preview ancestor no longer exists: " + parent);
+                }
+                layerMap[parent].visible = true;
+                parent = parentMap[parent];
+            }
+        }
+        function fitPreview(previewDoc, maxDimension) {
+            var width = previewDoc.width.as("px");
+            var height = previewDoc.height.as("px");
+            var longest = Math.max(width, height);
+            if (longest > maxDimension) {
+                var scale = maxDimension / longest;
+                previewDoc.resizeImage(
+                    UnitValue(Math.round(width * scale), "px"),
+                    UnitValue(Math.round(height * scale), "px"),
+                    undefined,
+                    ResampleMethod.BICUBIC
+                );
+            }
+        }
+        function savePng(previewDoc, path, maxDimension) {
+            var file = new File(path);
+            if (file.exists) {
+                throw new Error("Preview file already exists: " + path);
+            }
+            previewDoc.flatten();
+            fitPreview(previewDoc, maxDimension);
+            var options = new PNGSaveOptions();
+            options.interlaced = false;
+            previewDoc.saveAs(file, options, true, Extension.LOWERCASE);
+            if (!file.exists || file.length <= 0) {
+                throw new Error("Photoshop did not create preview: " + path);
+            }
+        }
+
+        if (cfg.preview_dir) {
+            var previewFolder = new Folder(cfg.preview_dir);
+            if (!previewFolder.exists && !previewFolder.create()) {
+                throw new Error("Could not create preview directory: " + cfg.preview_dir);
+            }
+            var compositeDoc = null;
+            try {
+                compositeDoc = doc.duplicate("SCI_PS_COMPOSITE_PREVIEW", false);
+                savePng(
+                    compositeDoc,
+                    cfg.preview_dir + "/composite.png",
+                    cfg.preview_max_dimension
+                );
+                rows.push(encodeRecord([
+                    "PREVIEW", "__composite__", "PASS",
+                    cfg.preview_dir + "/composite.png", "Full composite preview"
+                ]));
+            } finally {
+                if (compositeDoc !== null) {
+                    try {
+                        compositeDoc.close(SaveOptions.DONOTSAVECHANGES);
+                    } catch (compositeCloseError) {}
+                }
+            }
+
+            var workingPreviewDoc = null;
+            try {
+                workingPreviewDoc = doc.duplicate("SCI_PS_LAYER_PREVIEW_WORK", false);
+                var previewLayerMap = {};
+                function mapPreviewLayers(container, parentKey) {
+                    var collection = container.layers;
+                    for (var p = 0; p < collection.length; p++) {
+                        var candidateLayer = collection[p];
+                        var candidateIsGroup = candidateLayer.typename === "LayerSet";
+                        var candidateKey = parentKey + "/" +
+                            (candidateIsGroup ? "G" : "L") + p;
+                        previewLayerMap[candidateKey] = candidateLayer;
+                        if (candidateIsGroup) {
+                            mapPreviewLayers(candidateLayer, candidateKey);
+                        }
+                    }
+                }
+                mapPreviewLayers(workingPreviewDoc, "root");
+
+                var limit = Math.min(
+                    previewCandidates.length,
+                    Math.max(0, Number(cfg.preview_max_layers))
+                );
+                for (var candidateIndex = 0; candidateIndex < limit; candidateIndex++) {
+                    var candidateKey = previewCandidates[candidateIndex];
+                    var candidate = previewLayerMap[candidateKey];
+                    var previewNumber = candidateIndex + 1;
+                    var fileName = "layer_" +
+                        (previewNumber < 10 ? "0" : "") +
+                        previewNumber + ".png";
+                    var filePath = cfg.preview_dir + "/" + fileName;
+                    var renderDoc = null;
+                    try {
+                        // Restore the original visibility state before each
+                        // isolation pass, then hide every sibling.
+                        restoreVisibility(workingPreviewDoc, "root");
+                        hideAll(workingPreviewDoc);
+                        candidate.visible = true;
+                        var parent = parentMap[candidateKey];
+                        while (parent !== undefined && parent !== "root") {
+                            previewLayerMap[parent].visible = true;
+                            parent = parentMap[parent];
+                        }
+                        renderDoc = workingPreviewDoc.duplicate(
+                            "SCI_PS_LAYER_PREVIEW_" + previewNumber,
+                            false
+                        );
+                        savePng(renderDoc, filePath, cfg.preview_max_dimension);
+                        rows.push(encodeRecord([
+                            "PREVIEW", candidateKey, "PASS", filePath,
+                            "Isolated visible ArtLayer preview"
+                        ]));
+                    } catch (previewError) {
+                        rows.push(encodeRecord([
+                            "PREVIEW", candidateKey, "SKIP", "",
+                            clean(previewError.message)
+                        ]));
+                    } finally {
+                        if (renderDoc !== null) {
+                            try {
+                                renderDoc.close(SaveOptions.DONOTSAVECHANGES);
+                            } catch (renderCloseError) {}
+                        }
+                    }
+                }
+            } finally {
+                if (workingPreviewDoc !== null) {
+                    try {
+                        workingPreviewDoc.close(SaveOptions.DONOTSAVECHANGES);
+                    } catch (workingCloseError) {}
+                }
+            }
+        }
 
         doc.close(SaveOptions.DONOTSAVECHANGES);
         doc = null;
