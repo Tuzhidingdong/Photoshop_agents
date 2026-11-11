@@ -4265,8 +4265,8 @@ def _validate_organize_plan(
         layer = require_layer(key, field)
         if layer["typename"] != "LayerSet":
             raise ValueError(field + " must reference root, a LayerSet, or an earlier created group.")
-        if layer["all_locked"]:
-            raise ValueError(field + " cannot target a fully locked LayerSet.")
+        if layer["all_locked"] or layer["position_locked"]:
+            raise ValueError(field + " cannot target a fully or position-locked LayerSet.")
         return key
 
     def destination_is_inside_target(destination: str, target_key: str) -> bool:
@@ -4346,8 +4346,8 @@ def _validate_organize_plan(
                     destination_layer = require_layer(destination, "move_layer.destination")
                     if destination_layer["typename"] != "LayerSet":
                         raise ValueError("move_layer.destination must be root, a LayerSet, or a created group.")
-                    if destination_layer["all_locked"]:
-                        raise ValueError("move_layer.destination cannot be a fully locked LayerSet.")
+                    if destination_layer["all_locked"] or destination_layer["position_locked"]:
+                        raise ValueError("move_layer.destination cannot be a fully or position-locked LayerSet.")
                 if layer["typename"] == "LayerSet" and destination_is_inside_target(
                     destination, target
                 ):
