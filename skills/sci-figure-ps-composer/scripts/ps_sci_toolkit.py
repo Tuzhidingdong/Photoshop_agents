@@ -18,6 +18,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import unquote
 
 
 PROTOCOL_PREFIX = "SCI_PS_"
@@ -2636,6 +2637,1008 @@ def export_figure(
                     temp_path.unlink()
             except OSError:
                 pass
+
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: non-destructive publication preflight
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_PANEL_FIELDS = (
+    "panel_id",
+    "group_name",
+    "smart_layer_name",
+    "source_width_px",
+    "source_height_px",
+    "image_left",
+    "image_top",
+    "image_right",
+    "image_bottom",
+    "effective_ppi_x",
+    "effective_ppi_y",
+    "panel_label_count",
+    "panel_label_text",
+    "panel_label_font",
+    "panel_label_size_pt",
+    "panel_label_color",
+    "panel_label_left",
+    "panel_label_top",
+    "panel_label_right",
+    "panel_label_bottom",
+    "scale_bar_count",
+    "scale_bar_width_px",
+    "scale_bar_height_px",
+    "scale_bar_left",
+    "scale_bar_top",
+    "scale_bar_right",
+    "scale_bar_bottom",
+    "scale_outline_count",
+    "scale_outline_left",
+    "scale_outline_top",
+    "scale_outline_right",
+    "scale_outline_bottom",
+    "scale_label_count",
+    "scale_label_text",
+    "scale_label_font",
+    "scale_label_size_pt",
+    "scale_label_color",
+    "scale_label_left",
+    "scale_label_top",
+    "scale_label_right",
+    "scale_label_bottom",
+)
+
+
+def _build_preflight_figure_jsx(config: Dict[str, Any]) -> str:
+    """Build read-only JSX that inspects panels, Smart Objects, and text layers."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function px(value) {
+        return value.as("px");
+    }
+    function number(value) {
+        return (value === undefined || value === null) ? "" : String(value);
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(number(values[i])));
+        }
+        return encoded.join("|");
+    }
+    function boundsOf(layer) {
+        var b = layer.bounds;
+        return [
+            px(b[0]),
+            px(b[1]),
+            px(b[2]),
+            px(b[3])
+        ];
+    }
+    function rgbHex(color) {
+        function hex(value) {
+            var result = Math.round(value).toString(16).toUpperCase();
+            return result.length < 2 ? "0" + result : result;
+        }
+        try {
+            return "#" +
+                hex(color.rgb.red) +
+                hex(color.rgb.green) +
+                hex(color.rgb.blue);
+        } catch (colorError) {
+            return "";
+        }
+    }
+    function textProperties(layer) {
+        if (layer === null) {
+            return ["", "", "", "", "", "", "", "", ""];
+        }
+        var item = layer.textItem;
+        var b = boundsOf(layer);
+        return [
+            String(item.contents),
+            String(item.font),
+            item.size.as("pt"),
+            rgbHex(item.color),
+            b[0], b[1], b[2], b[3]
+        ];
+    }
+    function collectContainer(container, parentPath, result) {
+        for (var i = 0; i < container.artLayers.length; i++) {
+            var layer = container.artLayers[i];
+            var layerPath = parentPath + "/" + layer.name;
+            if (layer.kind == LayerKind.SMARTOBJECT) {
+                result.smartObjects.push(layer);
+            }
+            if (layer.kind == LayerKind.TEXT) {
+                var textItem = layer.textItem;
+                var b = boundsOf(layer);
+                result.textRecords.push([
+                    "TEXT",
+                    layerPath,
+                    layer.name,
+                    String(textItem.contents),
+                    String(textItem.font),
+                    textItem.size.as("pt"),
+                    rgbHex(textItem.color),
+                    b[0], b[1], b[2], b[3]
+                ]);
+            }
+        }
+        for (var groupIndex = 0; groupIndex < container.layerSets.length; groupIndex++) {
+            var group = container.layerSets[groupIndex];
+            collectContainer(group, parentPath + "/" + group.name, result);
+        }
+    }
+    function findNamedLayers(container, exactName, matches) {
+        for (var i = 0; i < container.artLayers.length; i++) {
+            var layer = container.artLayers[i];
+            if (layer.name === exactName) {
+                matches.push(layer);
+            }
+        }
+        for (var groupIndex = 0; groupIndex < container.layerSets.length; groupIndex++) {
+            findNamedLayers(container.layerSets[groupIndex], exactName, matches);
+        }
+    }
+    function countSmartObjects(container) {
+        var count = 0;
+        for (var i = 0; i < container.artLayers.length; i++) {
+            if (container.artLayers[i].kind == LayerKind.SMARTOBJECT) {
+                count++;
+            }
+        }
+        for (var groupIndex = 0; groupIndex < container.layerSets.length; groupIndex++) {
+            count += countSmartObjects(container.layerSets[groupIndex]);
+        }
+        return count;
+    }
+
+    var cfg = __SCI_PREFLIGHT_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var smartDoc = null;
+    var rows = [];
+    var response = "";
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var sourceFile = new File(cfg.input_path);
+        if (!sourceFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+
+        doc = app.open(sourceFile);
+        var width = px(doc.width);
+        var height = px(doc.height);
+        var dpi = Number(doc.resolution);
+        var mode = doc.mode == DocumentMode.RGB ? "RGB" : String(doc.mode);
+        var profile = "";
+        try {
+            profile = String(doc.colorProfileName);
+        } catch (profileError) {}
+
+        var panelGroups = [];
+        for (var groupIndex = 0; groupIndex < doc.layerSets.length; groupIndex++) {
+            var candidateGroup = doc.layerSets[groupIndex];
+            if (candidateGroup.name.indexOf("Group_Panel_") === 0) {
+                panelGroups.push(candidateGroup);
+            }
+        }
+
+        var all = {
+            smartObjects: [],
+            textRecords: []
+        };
+        collectContainer(doc, doc.name, all);
+
+        rows.push(encodeRecord([
+            "DOC",
+            doc.name,
+            width,
+            height,
+            dpi,
+            mode,
+            profile,
+            panelGroups.length,
+            all.smartObjects.length,
+            all.textRecords.length
+        ]));
+
+        for (var panelIndex = 0; panelIndex < panelGroups.length; panelIndex++) {
+            var panelGroup = panelGroups[panelIndex];
+            var panelId = panelGroup.name.substring("Group_Panel_".length);
+            var imageLayers = [];
+            var panelTexts = [];
+            var panelResult = {
+                smartObjects: [],
+                textRecords: []
+            };
+            collectContainer(panelGroup, panelGroup.name, panelResult);
+
+            for (var smartIndex = 0; smartIndex < panelResult.smartObjects.length; smartIndex++) {
+                var smartCandidate = panelResult.smartObjects[smartIndex];
+                if (smartCandidate.name.indexOf("Image_Panel_") === 0) {
+                    imageLayers.push(smartCandidate);
+                }
+            }
+
+            for (var textIndex = 0; textIndex < panelResult.textRecords.length; textIndex++) {
+                panelTexts.push(panelResult.textRecords[textIndex]);
+            }
+
+            var imageLayer = imageLayers.length > 0 ? imageLayers[0] : null;
+            var sourceWidth = 0;
+            var sourceHeight = 0;
+            var imageBounds = [0, 0, 0, 0];
+            var ppiX = 0;
+            var ppiY = 0;
+            var smartName = "";
+
+            if (imageLayer !== null) {
+                smartName = imageLayer.name;
+                imageBounds = boundsOf(imageLayer);
+
+                doc.activeLayer = imageLayer;
+                executeAction(
+                    stringIDToTypeID("placedLayerEditContents"),
+                    new ActionDescriptor(),
+                    DialogModes.NO
+                );
+                smartDoc = app.activeDocument;
+                sourceWidth = px(smartDoc.width);
+                sourceHeight = px(smartDoc.height);
+                smartDoc.close(SaveOptions.DONOTSAVECHANGES);
+                smartDoc = null;
+                app.activeDocument = doc;
+
+                var displayedWidth = imageBounds[2] - imageBounds[0];
+                var displayedHeight = imageBounds[3] - imageBounds[1];
+                if (displayedWidth > 0 && displayedHeight > 0) {
+                    ppiX = sourceWidth / displayedWidth * dpi;
+                    ppiY = sourceHeight / displayedHeight * dpi;
+                }
+            }
+
+            var panelLabels = [];
+            var scaleBars = [];
+            var scaleOutlines = [];
+            var scaleLabels = [];
+            findNamedLayers(panelGroup, "Panel_Label_" + panelId, panelLabels);
+            findNamedLayers(panelGroup, "Scale_Bar_" + panelId, scaleBars);
+            findNamedLayers(panelGroup, "Scale_Bar_Outline_" + panelId, scaleOutlines);
+            findNamedLayers(panelGroup, "Scale_Label_" + panelId, scaleLabels);
+
+            var panelLabelProps = textProperties(
+                panelLabels.length > 0 ? panelLabels[0] : null
+            );
+            var scaleLabelProps = textProperties(
+                scaleLabels.length > 0 ? scaleLabels[0] : null
+            );
+            var barBounds = scaleBars.length > 0 ?
+                boundsOf(scaleBars[0]) : [0, 0, 0, 0];
+            var outlineBounds = scaleOutlines.length > 0 ?
+                boundsOf(scaleOutlines[0]) : [0, 0, 0, 0];
+
+            rows.push(encodeRecord([
+                "PANEL",
+                panelId,
+                panelGroup.name,
+                smartName,
+                sourceWidth,
+                sourceHeight,
+                imageBounds[0], imageBounds[1], imageBounds[2], imageBounds[3],
+                ppiX, ppiY,
+                panelLabels.length,
+                panelLabelProps[0], panelLabelProps[1], panelLabelProps[2],
+                panelLabelProps[3],
+                panelLabelProps[4], panelLabelProps[5],
+                panelLabelProps[6], panelLabelProps[7],
+                scaleBars.length,
+                barBounds[2] - barBounds[0],
+                barBounds[3] - barBounds[1],
+                barBounds[0], barBounds[1], barBounds[2], barBounds[3],
+                scaleOutlines.length,
+                outlineBounds[0], outlineBounds[1],
+                outlineBounds[2], outlineBounds[3],
+                scaleLabels.length,
+                scaleLabelProps[0], scaleLabelProps[1], scaleLabelProps[2],
+                scaleLabelProps[3],
+                scaleLabelProps[4], scaleLabelProps[5],
+                scaleLabelProps[6], scaleLabelProps[7]
+            ]));
+        }
+
+        for (var textRecordIndex = 0; textRecordIndex < all.textRecords.length; textRecordIndex++) {
+            rows.push(encodeRecord(all.textRecords[textRecordIndex]));
+        }
+
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+        doc = null;
+
+        response = [
+            "SCI_PS_PREFLIGHT",
+            "OK",
+            rows.join("\n")
+        ].join("\t");
+
+    } catch (e) {
+        response = [
+            "SCI_PS_PREFLIGHT",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (smartDoc !== null) {
+            try {
+                smartDoc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (smartCloseError) {}
+        }
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreError) {}
+        }
+        app.displayDialogs = previousDialogs;
+    }
+
+    return response;
+})();
+"""
+    return template.replace("__SCI_PREFLIGHT_CONFIG__", payload)
+
+
+def _parse_preflight_records(encoded_records: str) -> Dict[str, Any]:
+    """Decode record-delimited inspection values returned by ExtendScript."""
+    parsed: Dict[str, Any] = {
+        "document": None,
+        "panels": [],
+        "text_layers": [],
+    }
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if not values:
+            continue
+        if values[0] == "DOC":
+            if len(values) != 10:
+                raise ValueError("Invalid DOC preflight record: " + repr(values))
+            parsed["document"] = {
+                "name": values[1],
+                "width_px": int(float(values[2])),
+                "height_px": int(float(values[3])),
+                "dpi": float(values[4]),
+                "mode": values[5],
+                "color_profile": values[6],
+                "panel_group_count": int(float(values[7])),
+                "smart_object_count": int(float(values[8])),
+                "text_layer_count": int(float(values[9])),
+            }
+        elif values[0] == "PANEL":
+            if len(values) != 42:
+                raise ValueError(
+                    "Invalid PANEL preflight record; expected 42 fields, got "
+                    + str(len(values))
+                )
+            panel = dict(zip(_PREFLIGHT_PANEL_FIELDS, values[1:]))
+            integer_fields = (
+                "source_width_px", "source_height_px",
+                "panel_label_count", "scale_bar_count", "scale_outline_count",
+                "scale_label_count",
+            )
+            float_fields = (
+                "image_left", "image_top", "image_right", "image_bottom",
+                "effective_ppi_x", "effective_ppi_y",
+                "panel_label_size_pt", "panel_label_left", "panel_label_top",
+                "panel_label_right", "panel_label_bottom",
+                "scale_bar_width_px", "scale_bar_height_px",
+                "scale_bar_left", "scale_bar_top", "scale_bar_right", "scale_bar_bottom",
+                "scale_outline_left", "scale_outline_top",
+                "scale_outline_right", "scale_outline_bottom",
+                "scale_label_size_pt", "scale_label_left", "scale_label_top",
+                "scale_label_right", "scale_label_bottom",
+            )
+            for key in integer_fields:
+                panel[key] = int(float(panel[key] or 0))
+            for key in float_fields:
+                panel[key] = float(panel[key] or 0)
+            parsed["panels"].append(panel)
+        elif values[0] == "TEXT":
+            if len(values) != 11:
+                raise ValueError("Invalid TEXT preflight record: " + repr(values))
+            parsed["text_layers"].append({
+                "path": values[1],
+                "name": values[2],
+                "contents": values[3],
+                "font_postscript": values[4],
+                "size_pt": float(values[5] or 0),
+                "color_hex": values[6],
+                "left": float(values[7] or 0),
+                "top": float(values[8] or 0),
+                "right": float(values[9] or 0),
+                "bottom": float(values[10] or 0),
+            })
+        else:
+            raise ValueError("Unknown preflight record type: " + values[0])
+
+    if parsed["document"] is None:
+        raise ValueError("Photoshop preflight response did not contain a DOC record.")
+    return parsed
+
+
+def _normalize_scale_calibrations(
+    calibrations: Optional[Dict[str, Any] | str | Path],
+) -> Dict[str, Dict[str, Any]]:
+    if calibrations is None:
+        return {}
+    if isinstance(calibrations, (str, Path)):
+        calibration_path = Path(calibrations).expanduser().resolve(strict=True)
+        loaded = json.loads(calibration_path.read_text(encoding="utf-8-sig"))
+    else:
+        loaded = calibrations
+    if not isinstance(loaded, dict):
+        raise ValueError("Calibration manifest must be a JSON object keyed by panel ID.")
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for panel_id, item in loaded.items():
+        if not isinstance(item, dict):
+            raise ValueError("Calibration for panel " + str(panel_id) + " must be an object.")
+        try:
+            physical_length = float(item["physical_length"])
+            pixel_size = float(item["pixel_size"])
+            unit = str(item["unit"]).strip()
+            tolerance_px = float(item.get("tolerance_px", 2.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Calibration for panel " + str(panel_id) +
+                " requires positive physical_length, pixel_size, and unit."
+            ) from exc
+        if physical_length <= 0 or pixel_size <= 0 or not unit:
+            raise ValueError("Calibration values for panel " + str(panel_id) + " must be positive.")
+        if tolerance_px < 0:
+            raise ValueError("Calibration tolerance_px cannot be negative.")
+        normalized[str(panel_id).strip().lower()] = {
+            "physical_length": physical_length,
+            "pixel_size": pixel_size,
+            "unit": unit,
+            "tolerance_px": tolerance_px,
+        }
+    return normalized
+
+
+def preflight_figure(
+    input_path: str | Path,
+    *,
+    expected_dpi: Optional[int] = None,
+    expected_width_cm: Optional[float] = None,
+    width_tolerance_cm: float = 0.05,
+    min_panel_ppi: float = 300.0,
+    require_panel_labels: bool = True,
+    panel_label_font: str = "Arial-BoldMT",
+    panel_label_min_pt: float = 10.0,
+    panel_label_max_pt: float = 12.0,
+    figure_text_font: str = "ArialMT",
+    figure_text_size_pt: float = 7.0,
+    text_size_tolerance_pt: float = 0.5,
+    check_text_styles: bool = True,
+    calibrations: Optional[Dict[str, Any] | str | Path] = None,
+    calibration_default_tolerance_px: float = 2.0,
+    export_dir: Optional[str | Path] = None,
+    export_basename: Optional[str] = None,
+    strict: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Inspect publication readiness without saving or modifying the source PSD.
+
+    Hard structural/document errors fail the preflight. Resolution and
+    typography deviations are warnings by default; strict=True promotes them
+    to failures. Optional calibration data validates physical scale bars, and
+    optional export_dir checks a previously generated PSD/TIFF/PNG bundle.
+    """
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    if expected_dpi is not None and expected_dpi not in (300, 600):
+        raise ValueError("expected_dpi must be 300, 600, or None.")
+    if expected_width_cm is not None and float(expected_width_cm) <= 0:
+        raise ValueError("expected_width_cm must be greater than zero.")
+    if float(width_tolerance_cm) < 0:
+        raise ValueError("width_tolerance_cm cannot be negative.")
+    if float(min_panel_ppi) <= 0:
+        raise ValueError("min_panel_ppi must be greater than zero.")
+    if not 1.0 <= float(panel_label_min_pt) <= float(panel_label_max_pt) <= 200.0:
+        raise ValueError("Panel-label point-size range is invalid.")
+    if float(text_size_tolerance_pt) < 0:
+        raise ValueError("text_size_tolerance_pt cannot be negative.")
+    if float(calibration_default_tolerance_px) < 0:
+        raise ValueError("calibration_default_tolerance_px cannot be negative.")
+
+    calibration_map = _normalize_scale_calibrations(calibrations)
+    if not isinstance(panel_label_font, str) or not panel_label_font.strip():
+        raise ValueError("panel_label_font must be a non-empty PostScript font name.")
+    if not isinstance(figure_text_font, str) or not figure_text_font.strip():
+        raise ValueError("figure_text_font must be a non-empty PostScript font name.")
+
+    export_folder: Optional[Path] = None
+    export_stem: Optional[str] = None
+    if export_dir is not None:
+        export_folder = Path(export_dir).expanduser().resolve(strict=True)
+        if not export_folder.is_dir():
+            raise ValueError("export_dir must be an existing directory.")
+        export_stem = (
+            source_file.stem
+            if export_basename is None
+            else str(export_basename).strip()
+        )
+        invalid_chars = '<>:"/\\\\|?*'
+        if (
+            not export_stem
+            or export_stem in (".", "..")
+            or any(char in invalid_chars or ord(char) < 32 for char in export_stem)
+        ):
+            raise ValueError("export_basename must be a simple Windows-safe file name.")
+
+    source_hash_before = _sha256_file(source_file)
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    jsx = _build_preflight_figure_jsx({"input_path": str(source_file)})
+    raw = active_bridge.execute_jsx(jsx)
+    protocol = _parse_protocol(raw, "SCI_PS_PREFLIGHT", 3, "preflight_figure", jsx)
+    inspected = _parse_preflight_records(protocol[2])
+    document = inspected["document"]
+    panels = inspected["panels"]
+    text_layers = inspected["text_layers"]
+
+    checks: list[Dict[str, Any]] = []
+
+    def add_check(
+        check_id: str,
+        status: str,
+        message: str,
+        *,
+        actual: Any = None,
+        expected: Any = None,
+    ) -> None:
+        final_status = "FAIL" if strict and status == "WARN" else status
+        checks.append({
+            "id": check_id,
+            "status": final_status,
+            "message": message,
+            "actual": actual,
+            "expected": expected,
+        })
+
+    width_cm = document["width_px"] * 2.54 / document["dpi"] if document["dpi"] > 0 else 0.0
+    add_check(
+        "canvas.geometry",
+        "PASS" if document["width_px"] > 0 and document["height_px"] > 0 else "FAIL",
+        "Canvas dimensions are valid." if document["width_px"] > 0 and document["height_px"] > 0 else "Canvas has invalid dimensions.",
+        actual={
+            "width_px": document["width_px"],
+            "height_px": document["height_px"],
+            "width_cm": round(width_cm, 4),
+            "height_cm": round(document["height_px"] * 2.54 / document["dpi"], 4) if document["dpi"] > 0 else None,
+        },
+    )
+    dpi_valid = document["dpi"] in (300.0, 600.0)
+    dpi_matches = expected_dpi is None or abs(document["dpi"] - expected_dpi) <= 0.5
+    add_check(
+        "canvas.dpi",
+        "PASS" if dpi_valid and dpi_matches else "FAIL",
+        "Canvas resolution meets the 300/600 DPI requirement." if dpi_valid and dpi_matches else "Canvas resolution is not an allowed or requested publication DPI.",
+        actual=document["dpi"],
+        expected=expected_dpi if expected_dpi is not None else [300, 600],
+    )
+    add_check(
+        "canvas.color_mode",
+        "PASS" if document["mode"] == "RGB" else "FAIL",
+        "Canvas is RGB." if document["mode"] == "RGB" else "Publication figure is not RGB.",
+        actual=document["mode"],
+        expected="RGB",
+    )
+
+    if expected_width_cm is not None:
+        width_ok = abs(width_cm - float(expected_width_cm)) <= float(width_tolerance_cm)
+        add_check(
+            "canvas.width",
+            "PASS" if width_ok else "FAIL",
+            "Canvas width matches the requested journal geometry." if width_ok else "Canvas width differs from the requested journal geometry.",
+            actual=round(width_cm, 4),
+            expected={"width_cm": float(expected_width_cm), "tolerance_cm": float(width_tolerance_cm)},
+        )
+    else:
+        known_widths = {"single": 8.5, "half_double": 12.0, "double": 17.6}
+        nearest = min(known_widths.items(), key=lambda item: abs(item[1] - width_cm))
+        if abs(nearest[1] - width_cm) <= 0.05:
+            add_check(
+                "canvas.width_preset",
+                "PASS",
+                "Canvas width matches a configured journal-width preset.",
+                actual=round(width_cm, 4),
+                expected={"preset": nearest[0], "width_cm": nearest[1]},
+            )
+        else:
+            add_check(
+                "canvas.width_preset",
+                "INFO",
+                "Canvas uses a custom width; no journal-specific target width was supplied.",
+                actual=round(width_cm, 4),
+                expected="single=8.5 cm, half_double=12 cm, double=17.6 cm or explicit custom width",
+            )
+
+    panel_count = document["panel_group_count"]
+    add_check(
+        "structure.panel_groups",
+        "PASS" if panel_count > 0 and len(panels) == panel_count else "FAIL",
+        "Panel groups were detected." if panel_count > 0 and len(panels) == panel_count else "Panel-group structure is missing or incomplete.",
+        actual=panel_count,
+        expected="one inspectable Group_Panel_* per figure panel",
+    )
+    add_check(
+        "structure.smart_objects",
+        "PASS" if document["smart_object_count"] >= panel_count and panel_count > 0 else "FAIL",
+        "Embedded Smart Objects were detected." if document["smart_object_count"] >= panel_count and panel_count > 0 else "One or more panel Smart Objects are missing.",
+        actual=document["smart_object_count"],
+        expected="at least one image Smart Object per panel group",
+    )
+
+    for panel in panels:
+        panel_id = panel["panel_id"]
+        prefix = "panel_" + panel_id + "."
+        source_w = panel["source_width_px"]
+        source_h = panel["source_height_px"]
+        image_bounds = (
+            panel["image_left"], panel["image_top"],
+            panel["image_right"], panel["image_bottom"],
+        )
+        image_valid = (
+            source_w > 0 and source_h > 0 and
+            image_bounds[2] > image_bounds[0] and
+            image_bounds[3] > image_bounds[1]
+        )
+        add_check(
+            prefix + "smart_object",
+            "PASS" if image_valid and panel["smart_layer_name"] else "FAIL",
+            "Panel image Smart Object and bounds are valid." if image_valid and panel["smart_layer_name"] else "Panel is missing a readable image Smart Object.",
+            actual={
+                "layer": panel["smart_layer_name"],
+                "source_size_px": [source_w, source_h],
+                "display_bounds_px": list(image_bounds),
+            },
+        )
+
+        ppi_x = panel["effective_ppi_x"]
+        ppi_y = panel["effective_ppi_y"]
+        if image_valid and ppi_x > 0 and ppi_y > 0:
+            effective_ppi = min(ppi_x, ppi_y)
+            ppi_status = "PASS" if effective_ppi >= float(min_panel_ppi) else "WARN"
+            add_check(
+                prefix + "effective_ppi",
+                ppi_status,
+                "Effective panel resolution meets the requested minimum." if ppi_status == "PASS" else "Effective panel resolution is below the requested minimum; inspect the source raster or reduce its on-canvas size.",
+                actual={"x_ppi": round(ppi_x, 2), "y_ppi": round(ppi_y, 2), "limiting_ppi": round(effective_ppi, 2)},
+                expected={"minimum_ppi": float(min_panel_ppi)},
+            )
+        else:
+            add_check(
+                prefix + "effective_ppi",
+                "FAIL",
+                "Effective panel PPI could not be calculated.",
+                actual={"x_ppi": ppi_x, "y_ppi": ppi_y},
+                expected={"minimum_ppi": float(min_panel_ppi)},
+            )
+
+        label_count = panel["panel_label_count"]
+        if label_count == 0:
+            status = "WARN" if require_panel_labels and panel_count > 1 else "INFO"
+            add_check(
+                prefix + "panel_label",
+                status,
+                "Panel label is missing." if status == "WARN" else "No panel label is present; this is optional for the current figure.",
+                actual=0,
+                expected="one editable Panel_Label_<id> text layer" if require_panel_labels and panel_count > 1 else "optional",
+            )
+        elif label_count > 1:
+            add_check(
+                prefix + "panel_label",
+                "FAIL",
+                "More than one panel label layer exists in this panel group.",
+                actual=label_count,
+                expected=1,
+            )
+        else:
+            label_text = panel["panel_label_text"]
+            label_font = panel["panel_label_font"]
+            label_size = panel["panel_label_size_pt"]
+            label_color = panel["panel_label_color"]
+            style_ok = (
+                label_font == panel_label_font and
+                float(panel_label_min_pt) <= label_size <= float(panel_label_max_pt) and
+                label_color.upper() == "#000000"
+            )
+            add_check(
+                prefix + "panel_label_style",
+                "PASS" if style_ok else "WARN",
+                "Panel label font, size, and color match the figure standard." if style_ok else "Panel label typography differs from the configured standard.",
+                actual={"text": label_text, "font": label_font, "size_pt": label_size, "color": label_color},
+                expected={"font": panel_label_font, "size_range_pt": [panel_label_min_pt, panel_label_max_pt], "color": "#000000"},
+            )
+            expected_label_texts = (panel_id, panel_id.upper(), "(" + panel_id + ")")
+            label_text_ok = label_text in expected_label_texts
+            add_check(
+                prefix + "panel_label_content",
+                "PASS" if label_text_ok else "WARN",
+                "Panel label content follows the panel identifier." if label_text_ok else "Panel label content does not match its panel identifier.",
+                actual=label_text,
+                expected=list(expected_label_texts),
+            )
+            label_inside = (
+                panel["panel_label_left"] >= image_bounds[0] - 0.5 and
+                panel["panel_label_top"] >= image_bounds[1] - 0.5 and
+                panel["panel_label_right"] <= image_bounds[2] + 0.5 and
+                panel["panel_label_bottom"] <= image_bounds[3] + 0.5
+            )
+            add_check(
+                prefix + "panel_label_bounds",
+                "PASS" if label_inside else "WARN",
+                "Panel label lies within the image bounds." if label_inside else "Panel label extends outside the panel image bounds.",
+                actual=[
+                    panel["panel_label_left"], panel["panel_label_top"],
+                    panel["panel_label_right"], panel["panel_label_bottom"],
+                ],
+                expected=list(image_bounds),
+            )
+
+        bar_count = panel["scale_bar_count"]
+        outline_count = panel["scale_outline_count"]
+        scale_label_count = panel["scale_label_count"]
+        if bar_count == 0 and scale_label_count == 0 and outline_count == 0:
+            add_check(prefix + "scale_bar", "INFO", "No scale bar is present in this panel.")
+        elif bar_count != 1 or scale_label_count != 1 or outline_count > 1:
+            add_check(
+                prefix + "scale_bar",
+                "FAIL",
+                "Scale-bar components are incomplete or duplicated.",
+                actual={"bar": bar_count, "outline": outline_count, "label": scale_label_count},
+                expected={"bar": 1, "outline": "0 or 1", "label": 1},
+            )
+        else:
+            bar_bounds = (
+                panel["scale_bar_left"], panel["scale_bar_top"],
+                panel["scale_bar_right"], panel["scale_bar_bottom"],
+            )
+            bar_inside = (
+                panel["scale_bar_width_px"] > 1 and
+                panel["scale_bar_height_px"] > 1 and
+                bar_bounds[0] >= image_bounds[0] - 0.5 and
+                bar_bounds[1] >= image_bounds[1] - 0.5 and
+                bar_bounds[2] <= image_bounds[2] + 0.5 and
+                bar_bounds[3] <= image_bounds[3] + 0.5
+            )
+            add_check(
+                prefix + "scale_bar_geometry",
+                "PASS" if bar_inside else "FAIL",
+                "Scale-bar rectangle is inside the panel image." if bar_inside else "Scale-bar rectangle has invalid dimensions or extends outside its panel.",
+                actual={"width_px": panel["scale_bar_width_px"], "height_px": panel["scale_bar_height_px"], "bounds": list(bar_bounds)},
+                expected="positive rectangle fully inside panel image bounds",
+            )
+            if outline_count == 1:
+                outline_inside = (
+                    panel["scale_outline_left"] <= bar_bounds[0] + 0.5 and
+                    panel["scale_outline_top"] <= bar_bounds[1] + 0.5 and
+                    panel["scale_outline_right"] >= bar_bounds[2] - 0.5 and
+                    panel["scale_outline_bottom"] >= bar_bounds[3] - 0.5
+                )
+                add_check(
+                    prefix + "scale_bar_outline",
+                    "PASS" if outline_inside else "WARN",
+                    "Contrasting outline encloses the scale bar." if outline_inside else "Scale-bar outline does not fully enclose the bar.",
+                    actual=[
+                        panel["scale_outline_left"], panel["scale_outline_top"],
+                        panel["scale_outline_right"], panel["scale_outline_bottom"],
+                    ],
+                    expected="outline contains the bar rectangle",
+                )
+
+            scale_bounds = (
+                panel["scale_label_left"], panel["scale_label_top"],
+                panel["scale_label_right"], panel["scale_label_bottom"],
+            )
+            label_inside = (
+                scale_bounds[0] >= image_bounds[0] - 0.5 and
+                scale_bounds[1] >= image_bounds[1] - 0.5 and
+                scale_bounds[2] <= image_bounds[2] + 0.5 and
+                scale_bounds[3] <= image_bounds[3] + 0.5
+            )
+            add_check(
+                prefix + "scale_label_bounds",
+                "PASS" if label_inside else "WARN",
+                "Scale label lies within panel bounds." if label_inside else "Scale label extends outside its panel.",
+                actual=list(scale_bounds),
+                expected=list(image_bounds),
+            )
+            label_above_bar = panel["scale_label_bottom"] <= panel["scale_bar_top"] + 0.5
+            add_check(
+                prefix + "scale_label_position",
+                "PASS" if label_above_bar else "WARN",
+                "Scale label is positioned above the bar." if label_above_bar else "Scale label overlaps or falls below the scale bar.",
+                actual={"label_bottom": panel["scale_label_bottom"], "bar_top": panel["scale_bar_top"]},
+                expected="label_bottom <= bar_top",
+            )
+
+            calibration = calibration_map.get(panel_id.lower())
+            if calibration is None:
+                add_check(
+                    prefix + "scale_calibration",
+                    "INFO",
+                    "Scale-bar geometry was checked, but physical calibration was not independently verified; supply a calibration manifest.",
+                    actual={"label": panel["scale_label_text"], "bar_width_px": panel["scale_bar_width_px"]},
+                    expected="physical_length, pixel_size, unit",
+                )
+            elif source_w <= 0:
+                add_check(
+                    prefix + "scale_calibration",
+                    "FAIL",
+                    "Scale calibration cannot be checked because the Smart Object source width is unavailable.",
+                )
+            else:
+                displayed_width = image_bounds[2] - image_bounds[0]
+                expected_bar_width = (
+                    calibration["physical_length"] / calibration["pixel_size"]
+                ) * displayed_width / source_w
+                tolerance = calibration.get(
+                    "tolerance_px", float(calibration_default_tolerance_px)
+                )
+                actual_bar_width = panel["scale_bar_width_px"]
+                width_ok = abs(actual_bar_width - expected_bar_width) <= tolerance
+                expected_label = (
+                    _format_scale_number(calibration["physical_length"]) +
+                    " " + calibration["unit"]
+                )
+                label_ok = panel["scale_label_text"] == expected_label
+                add_check(
+                    prefix + "scale_calibration_width",
+                    "PASS" if width_ok else "FAIL",
+                    "Measured scale-bar width matches the supplied physical calibration." if width_ok else "Scale-bar width differs from the supplied physical calibration.",
+                    actual={"bar_width_px": actual_bar_width, "absolute_error_px": round(abs(actual_bar_width - expected_bar_width), 4)},
+                    expected={"bar_width_px": expected_bar_width, "tolerance_px": tolerance},
+                )
+                add_check(
+                    prefix + "scale_calibration_label",
+                    "PASS" if label_ok else "FAIL",
+                    "Scale-bar label matches the supplied physical calibration." if label_ok else "Scale-bar label differs from the supplied physical calibration.",
+                    actual=panel["scale_label_text"],
+                    expected=expected_label,
+                )
+
+    if check_text_styles:
+        for text_layer in text_layers:
+            name = text_layer["name"]
+            if name.startswith("Panel_Label_"):
+                continue
+            if text_layer["color_hex"].upper() != "#000000":
+                add_check(
+                    "text_color." + text_layer["path"],
+                    "WARN",
+                    "Text color differs from black.",
+                    actual=text_layer["color_hex"],
+                    expected="#000000",
+                )
+            font_ok = text_layer["font_postscript"] == figure_text_font
+            size_ok = abs(text_layer["size_pt"] - float(figure_text_size_pt)) <= float(text_size_tolerance_pt)
+            add_check(
+                "text_style." + text_layer["path"],
+                "PASS" if font_ok and size_ok else "WARN",
+                "Figure text matches the configured font and point size." if font_ok and size_ok else "Figure text differs from the configured font or point size.",
+                actual={"font": text_layer["font_postscript"], "size_pt": text_layer["size_pt"]},
+                expected={"font": figure_text_font, "size_pt": float(figure_text_size_pt), "tolerance_pt": float(text_size_tolerance_pt)},
+            )
+
+    if any(
+        panel["scale_bar_count"] > 0
+        for panel in panels
+    ) and not calibration_map:
+        add_check(
+            "scale_calibration.manifest",
+            "INFO",
+            "No physical calibration manifest was supplied; scale-bar units cannot be inferred from the PSD alone.",
+        )
+
+    if export_folder is None:
+        add_check(
+            "exports.metadata",
+            "INFO",
+            "Export-bundle metadata was not checked; supply export_dir to inspect a PSD/TIFF/PNG bundle.",
+        )
+    else:
+        psd_export = export_folder / (str(export_stem) + ".psd")
+        tiff_export = export_folder / (str(export_stem) + ".tif")
+        png_export = export_folder / (str(export_stem) + ".png")
+        try:
+            psd_matches = psd_export.is_file() and _sha256_file(psd_export) == source_hash_before
+            add_check(
+                "exports.editable_psd",
+                "PASS" if psd_matches else "FAIL",
+                "Editable PSD export is byte-identical to the preflight source." if psd_matches else "Editable PSD export is missing or differs from the preflight source.",
+                actual={"path": str(psd_export), "exists": psd_export.is_file()},
+                expected="SHA-256 identical to input PSD",
+            )
+        except OSError as exc:
+            add_check("exports.editable_psd", "FAIL", "Could not inspect exported PSD: " + str(exc))
+        for fmt, raster_path, expected_format in (
+            ("tiff", tiff_export, "TIFF"),
+            ("png", png_export, "PNG"),
+        ):
+            try:
+                metadata = _inspect_export_raster(
+                    raster_path,
+                    expected_format=expected_format,
+                    expected_size=(document["width_px"], document["height_px"]),
+                    expected_dpi=document["dpi"],
+                )
+                if fmt == "tiff":
+                    add_check(
+                        "exports.tiff",
+                        "PASS",
+                        "TIFF has matching dimensions, RGB mode, DPI, and LZW compression.",
+                        actual=metadata,
+                        expected={"mode": "RGB", "dpi": document["dpi"], "compression_tag": 5},
+                    )
+                else:
+                    add_check(
+                        "exports.png",
+                        "PASS",
+                        "PNG has matching dimensions, RGB mode, and DPI metadata.",
+                        actual=metadata,
+                        expected={"mode": "RGB", "dpi": document["dpi"]},
+                    )
+            except Exception as exc:
+                add_check(
+                    "exports." + fmt,
+                    "FAIL",
+                    "Export metadata check failed: " + str(exc),
+                    actual=str(raster_path),
+                )
+
+    source_hash_unchanged = _sha256_file(source_file) == source_hash_before
+    add_check(
+        "source.integrity",
+        "PASS" if source_hash_unchanged else "FAIL",
+        "Source PSD was not modified during preflight." if source_hash_unchanged else "Source PSD changed during the read-only preflight.",
+        actual={"sha256_unchanged": source_hash_unchanged},
+        expected=True,
+    )
+
+    failure_count = sum(1 for item in checks if item["status"] == "FAIL")
+    warning_count = sum(1 for item in checks if item["status"] == "WARN")
+    return {
+        "document": document,
+        "canvas_width_cm": round(width_cm, 4),
+        "panels": panels,
+        "text_layers": text_layers,
+        "checks": checks,
+        "passed": failure_count == 0,
+        "strict": bool(strict),
+        "warning_count": warning_count,
+        "failure_count": failure_count,
+        "input_psd": str(source_file),
+        "input_sha256_unchanged": source_hash_unchanged,
+    }
 
 
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
