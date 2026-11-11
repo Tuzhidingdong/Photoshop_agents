@@ -66,7 +66,9 @@ def _parse_protocol(
     operation: str,
     jsx: str,
 ) -> list[str]:
-    raw = "" if result is None else str(result).strip()
+    # Preserve trailing tab delimiters: an empty active-document name is a
+    # valid final field when Photoshop has no open documents.
+    raw = "" if result is None else str(result).rstrip("\r\n")
     fields = raw.split("\t")
 
     if not fields or fields[0] != expected_marker:
