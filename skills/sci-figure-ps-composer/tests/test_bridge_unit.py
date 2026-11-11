@@ -1272,6 +1272,13 @@ class PreviewPsdLayersTests(unittest.TestCase):
         self.assertEqual(result["successful_count"], 4)
         self.assertEqual(result["failed_count"], 0)
         self.assertEqual(result["skipped_backgrounds"], ["root/L3"])
+        self.assertEqual(result["inspection_layer_count"], 5)
+        self.assertEqual(result["all_node_count"], 5)
+        self.assertEqual(result["eligible_non_background_node_count"], 4)
+        self.assertEqual(result["previewed_non_background_node_count"], 4)
+        self.assertTrue(result["full_visual_coverage"])
+        self.assertEqual(result["missing_preview_node_keys"], [])
+        self.assertEqual(result["failed_preview_node_keys"], [])
         self.assertTrue(Path(result["contact_sheet"]["path"]).is_file())
         self.assertTrue(Path(result["composite_preview"]).is_file())
         self.assertTrue(Path(result["report_path"]).is_file())
@@ -1300,6 +1307,12 @@ class PreviewPsdLayersTests(unittest.TestCase):
             [item["node_key"] for item in result["previews"]],
             ["root/G1/L0", "root/L2"],
         )
+        self.assertFalse(result["full_visual_coverage"])
+        self.assertEqual(
+            result["missing_preview_node_keys"],
+            ["root/G1", "root/L0"],
+        )
+        self.assertEqual(result["previewed_non_background_node_count"], 2)
 
     def test_preview_psd_layers_rejects_unknown_or_duplicate_node_keys(self):
         for keys in (["root/not-found"], ["root/L2", "root/L2"]):
