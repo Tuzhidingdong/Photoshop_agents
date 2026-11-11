@@ -6452,7 +6452,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "validate-psd-classification", "create-organize-plan-draft"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "create-psd-classification-template", "validate-psd-classification", "create-organize-plan-draft"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -6683,6 +6683,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "create-psd-classification-template":
+        if args.input_psd is None or args.inspection_report is None or args.output is None:
+            print(
+                "ERROR: --input-psd, --inspection-report, and --output "
+                "are required for --action create-psd-classification-template.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.inspection_report.is_file():
+            print("ERROR: inspection report does not exist: " + str(args.inspection_report), file=sys.stderr)
+            return 2
+        if args.preview_report is not None and not args.preview_report.is_file():
+            print("ERROR: preview report does not exist: " + str(args.preview_report), file=sys.stderr)
+            return 2
+
     if args.action in ("validate-psd-classification", "create-organize-plan-draft"):
         if args.input_psd is None or args.inspection_report is None or args.classification_report is None:
             print(
@@ -6823,6 +6838,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 bridge=bridge,
             )
 
+        elif args.action == "create-psd-classification-template":
+            result = create_psd_classification_template(
+                args.input_psd,
+                args.inspection_report,
+                args.output,
+                preview_report=args.preview_report,
+            )
         elif args.action == "validate-psd-classification":
             result = validate_psd_classification(
                 args.input_psd,
