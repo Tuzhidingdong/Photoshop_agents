@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge is implemented and has passed a real-machine diagnostic on Photoshop 2026. The first `compose_grid` implementation is now present: canvas geometry, raster input inspection, row-major grid layout, embedded Smart Objects, panel groups, optional native trim, and PSD save. This composition feature still requires a real Photoshop end-to-end test before it can be described as fully validated. Panel labels, scale bars, font unification, and TIFF/PNG publication export are not implemented yet.
+The implementation is staged. The Photoshop Bridge has passed a real-machine diagnostic on Photoshop 2026. The first `compose_grid` implementation is present, with geometry unit tests passing in CI; its native Photoshop placement/trim/save/reopen flow is awaiting the Windows integration demo. Panel labels, scale bars, font unification, and TIFF/PNG publication export are not implemented yet.
 
 ## Runtime requirements
 
@@ -37,9 +37,25 @@ python scripts/ps_sci_toolkit.py --action diagnose
 python scripts/ps_sci_toolkit.py --action status
 python scripts/ps_sci_toolkit.py --action lock-units
 python scripts/ps_sci_toolkit.py --action exec-jsx --jsx-file path\to\script.jsx
+
+# Four input panels, row-major order; 17.6 cm double-column, 300 DPI.
+python scripts/ps_sci_toolkit.py --action compose-grid `
+  --image panel-a.tif --image panel-b.tif `
+  --image panel-c.tif --image panel-d.tif `
+  --rows 2 --cols 2 --preset double --dpi 300 `
+  --margin-cm 0.3 --gap-cm 0.2 --auto-trim `
+  --output Figure_1.psd
 ~~~
 
 The default action is diagnose.
+
+Run the real Photoshop integration demo on Windows with Photoshop open:
+
+~~~powershell
+python tests/test_compose_grid_demo.py
+~~~
+
+The demo generates four synthetic source panels, composes them into a 2×2 PSD, and reopens the saved PSD in Photoshop to check the 2079 px canvas width, 300 DPI, RGB mode, four panel groups, and four embedded Smart Objects. It also checks that the original synthetic source files were not modified. The demo writes its assets and PSD under Documents in a timestamped folder.
 
 ### Bridge behavior
 
