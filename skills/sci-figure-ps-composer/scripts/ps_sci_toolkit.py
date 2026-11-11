@@ -4092,36 +4092,49 @@ def inspect_psd(
             )
 
         fingerprint_payload = [
-        {
-            "node_key": layer["node_key"],
-            "parent_key": layer["parent_key"],
-            "typename": layer["typename"],
-            "name": layer["name"],
-            "kind": layer["kind"],
-            "stack_index": layer["stack_index"],
-            "bounds_px": layer["bounds_px"],
-            "visible": layer["visible"],
-        }
-        for layer in inspected["layers"]
-    ]
+            {
+                "node_key": layer["node_key"],
+                "parent_key": layer["parent_key"],
+                "typename": layer["typename"],
+                "name": layer["name"],
+                "kind": layer["kind"],
+                "stack_index": layer["stack_index"],
+                "bounds_px": layer["bounds_px"],
+                "visible": layer["visible"],
+            }
+            for layer in inspected["layers"]
+        ]
         fingerprint = hashlib.sha256(
-            json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            json.dumps(
+                fingerprint_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
         ).hexdigest()
 
         report = {
-        "schema_version": 1,
-        "passed": True,
-        "input_psd": str(source_file),
-        "source_sha256": source_hash_before,
-        "layer_tree_sha256": fingerprint,
-        "document": inspected["document"],
-        "layer_count": inspected["layer_count"],
-        "group_count": sum(1 for layer in inspected["layers"] if layer["typename"] == "LayerSet"),
-        "text_layer_count": sum(1 for layer in inspected["layers"] if layer["kind"] == "LayerKind.TEXT"),
-        "smart_object_count": sum(1 for layer in inspected["layers"] if layer["kind"] == "LayerKind.SMARTOBJECT"),
-        "layers": inspected["layers"],
-        "source_sha256_unchanged": True,
-    }
+            "schema_version": 1,
+            "passed": True,
+            "input_psd": str(source_file),
+            "source_sha256": source_hash_before,
+            "layer_tree_sha256": fingerprint,
+            "document": inspected["document"],
+            "layer_count": inspected["layer_count"],
+            "group_count": sum(
+                1 for layer in inspected["layers"]
+                if layer["typename"] == "LayerSet"
+            ),
+            "text_layer_count": sum(
+                1 for layer in inspected["layers"]
+                if layer["kind"] == "LayerKind.TEXT"
+            ),
+            "smart_object_count": sum(
+                1 for layer in inspected["layers"]
+                if layer["kind"] == "LayerKind.SMARTOBJECT"
+            ),
+            "layers": inspected["layers"],
+            "source_sha256_unchanged": True,
+        }
 
         if report_file is not None:
             report["report_path"] = str(report_file)
@@ -4136,6 +4149,13 @@ def inspect_psd(
                 if temp_report.exists():
                     temp_report.unlink()
 
+        if _sha256_file(source_file) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "The source PSD changed before inspection completed.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
         return report
     finally:
         try:
