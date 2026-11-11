@@ -1293,7 +1293,7 @@ class OrganizePlanValidationTests(unittest.TestCase):
         plan = self.plan([
             {"action": "move_layer", "target": "root/L2", "expected_name": "Micrograph", "destination": "root/G1"}
         ])
-        with self.assertRaisesRegex(ValueError, "Clipping-mask"):
+        with self.assertRaisesRegex(ValueError, "clipping-mask chains"):
             _validate_organize_plan(plan, clipped)
 
     def test_plan_rejects_self_or_descendant_group_moves_and_sibling_mismatch(self):
@@ -1315,6 +1315,46 @@ class OrganizePlanValidationTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "siblings"):
             _validate_organize_plan(bad_reorder, self.inspection)
+
+    def test_plan_rejects_combined_group_moves_that_create_a_parent_cycle(self):
+        inspection = json.loads(json.dumps(self.inspection))
+        inspection["layers"].append({
+            "node_key": "root/G3",
+            "parent_key": "root",
+            "stack_index": 3,
+            "depth": 0,
+            "typename": "LayerSet",
+            "name": "Other Group",
+            "kind": "LayerSet",
+            "visible": True,
+            "opacity": 100.0,
+            "blend_mode": "BlendMode.PASS_THROUGH",
+            "is_background": False,
+            "all_locked": False,
+            "position_locked": False,
+            "pixels_locked": False,
+            "clipped_to_below": False,
+            "bounds_px": [0, 0, 10, 10],
+            "text": None,
+            "path": "Legacy Figure/Other Group",
+        })
+        inspection["layer_count"] += 1
+        plan = self.plan([
+            {
+                "action": "move_layer",
+                "target": "root/G1",
+                "expected_name": "Old Group",
+                "destination": "root/G3",
+            },
+            {
+                "action": "move_layer",
+                "target": "root/G3",
+                "expected_name": "Other Group",
+                "destination": "root/G1",
+            },
+        ])
+        with self.assertRaisesRegex(ValueError, "parent cycle"):
+            _validate_organize_plan(plan, inspection)
 
     def test_create_groups_must_come_before_layer_operations(self):
         plan = self.plan([
