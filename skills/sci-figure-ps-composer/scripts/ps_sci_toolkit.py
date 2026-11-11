@@ -916,7 +916,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -925,6 +925,32 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="JSX file to execute when --action exec-jsx is selected.",
     )
+    parser.add_argument(
+        "--image",
+        action="append",
+        help="Input raster image; repeat once per panel in row-major order.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Output PSD path. Existing files are protected unless --overwrite is supplied.",
+    )
+    parser.add_argument(
+        "--preset",
+        choices=("single", "half_double", "double", "custom"),
+        default="double",
+        help="Canvas width preset. Default: double (17.6 cm).",
+    )
+    parser.add_argument("--width-cm", type=float, help="Custom canvas width in cm.")
+    parser.add_argument("--height-cm", type=float, help="Optional explicit canvas height in cm.")
+    parser.add_argument("--rows", type=int, default=2)
+    parser.add_argument("--cols", type=int, default=2)
+    parser.add_argument("--dpi", type=int, choices=(300, 600), default=300)
+    parser.add_argument("--margin-cm", type=float, default=0.3)
+    parser.add_argument("--gap-cm", type=float, default=0.2)
+    parser.add_argument("--align", choices=("center", "top-left"), default="center")
+    parser.add_argument("--auto-trim", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--json",
         action="store_true",
@@ -954,6 +980,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             result["passed"] = True
         elif args.action == "lock-units":
             result = bridge.lock_units()
+            result["passed"] = True
+        elif args.action == "compose-grid":
+            result = compose_grid(
+                args.image or [],
+                args.output,
+                preset=args.preset,
+                width_cm=args.width_cm,
+                height_cm=args.height_cm,
+                rows=args.rows,
+                cols=args.cols,
+                dpi=args.dpi,
+                margin_cm=args.margin_cm,
+                gap_cm=args.gap_cm,
+                align=args.align,
+                auto_trim=args.auto_trim,
+                overwrite=args.overwrite,
+                bridge=bridge,
+            )
         else:
             jsx = args.jsx_file.read_text(encoding="utf-8-sig")
             result = {
