@@ -6048,7 +6048,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "validate-psd-classification", "create-organize-plan-draft"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -6105,6 +6105,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--organize-plan",
         type=Path,
         help="Approved structure-only JSON plan for --action apply-organize-plan.",
+    )
+    parser.add_argument(
+        "--classification-report",
+        type=Path,
+        help="Evidence-grounded semantic classification JSON for Stage 9B.",
+    )
+    parser.add_argument(
+        "--preview-report",
+        type=Path,
+        help="Optional Stage 9A visual preview manifest used to verify visual evidence.",
+    )
+    parser.add_argument(
+        "--plan-operations",
+        type=Path,
+        help="JSON array of explicitly proposed structure-only operations for plan drafting.",
     )
     parser.add_argument(
         "--preview-dir",
@@ -6264,6 +6279,35 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action in ("validate-psd-classification", "create-organize-plan-draft"):
+        if args.input_psd is None or args.inspection_report is None or args.classification_report is None:
+            print(
+                "ERROR: --input-psd, --inspection-report, and --classification-report "
+                "are required for Stage 9B.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.inspection_report.is_file():
+            print("ERROR: inspection report does not exist: " + str(args.inspection_report), file=sys.stderr)
+            return 2
+        if not args.classification_report.is_file():
+            print("ERROR: classification report does not exist: " + str(args.classification_report), file=sys.stderr)
+            return 2
+        if args.preview_report is not None and not args.preview_report.is_file():
+            print("ERROR: preview report does not exist: " + str(args.preview_report), file=sys.stderr)
+            return 2
+    if args.action == "create-organize-plan-draft":
+        if args.plan_operations is None or args.output is None:
+            print(
+                "ERROR: --plan-operations and --output are required for "
+                "--action create-organize-plan-draft.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.plan_operations.is_file():
+            print("ERROR: plan operations file does not exist: " + str(args.plan_operations), file=sys.stderr)
+            return 2
+
     if args.action == "apply-organize-plan":
         if args.input_psd is None or args.organize_plan is None or args.output is None:
             print(
@@ -6373,6 +6417,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                 max_previews=args.preview_max_layers,
                 thumbnail_width_px=args.preview_width_px,
                 bridge=bridge,
+            )
+
+        elif args.action == "validate-psd-classification":
+            result = validate_psd_classification(
+                args.input_psd,
+                args.inspection_report,
+                args.classification_report,
+                preview_report=args.preview_report,
+            )
+        elif args.action == "create-organize-plan-draft":
+            result = create_organize_plan_draft(
+                args.input_psd,
+                args.inspection_report,
+                args.classification_report,
+                args.plan_operations,
+                args.output,
+                preview_report=args.preview_report,
             )
         elif args.action == "apply-organize-plan":
             result = apply_organize_plan(
