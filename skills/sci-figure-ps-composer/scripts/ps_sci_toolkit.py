@@ -4274,6 +4274,7 @@ def inspect_psd(
         "sci_insp_" + token + ".psd"
     )
     jsx = ""
+    preview_success = False
     try:
         # Inspect a byte-identical temporary copy so an already-open, unsaved
         # Photoshop document cannot silently change the on-disk inspection basis.
@@ -4401,6 +4402,7 @@ def inspect_psd(
                 if temp_report.exists():
                     temp_report.unlink()
 
+        preview_success = True
         return report
     finally:
         try:
@@ -4408,7 +4410,7 @@ def inspect_psd(
                 temp_input.unlink()
         except OSError:
             pass
-        if preview_folder is not None and "report" not in locals():
+        if preview_folder is not None and not preview_success:
             try:
                 if preview_folder.exists():
                     shutil.rmtree(preview_folder)
@@ -5891,6 +5893,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON output path for --action inspect-psd.",
     )
     parser.add_argument(
+        "--preview-dir",
+        type=Path,
+        help="Optional new directory for composite and per-layer PNG previews during --action inspect-psd.",
+    )
+    parser.add_argument("--preview-max-layers", type=int, default=12)
+    parser.add_argument("--preview-max-dimension", type=int, default=1400)
+    parser.add_argument(
         "--organize-plan",
         type=Path,
         help="Approved structure-only JSON plan for --action apply-organize-plan.",
@@ -6152,6 +6161,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = inspect_psd(
                 args.input_psd,
                 report_path=args.inspection_report,
+                preview_dir=args.preview_dir,
+                preview_max_layers=args.preview_max_layers,
+                preview_max_dimension=args.preview_max_dimension,
                 bridge=bridge,
             )
         elif args.action == "preview-psd-layers":
