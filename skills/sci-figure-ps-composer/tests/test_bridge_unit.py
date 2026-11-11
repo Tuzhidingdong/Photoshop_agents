@@ -856,10 +856,9 @@ class ExportFigureUnitTests(unittest.TestCase):
         self.assertEqual(len(bridge.jsx_calls), 1)
         jsx = bridge.jsx_calls[0]
         import json
-        import re
-        config_match = re.search(r"var cfg = (\\{.*\\});", jsx)
-        self.assertIsNotNone(config_match)
-        config = json.loads(config_match.group(1))
+        config_start = jsx.index("var cfg = ") + len("var cfg = ")
+        config_end = jsx.index(";", config_start)
+        config = json.loads(jsx[config_start:config_end])
         self.assertTrue(Path(config["psd_temp_path"]).name.startswith(".sci_ps_"))
         self.assertTrue(Path(config["tiff_temp_path"]).name.startswith(".sci_tif_"))
         self.assertTrue(Path(config["png_temp_path"]).name.startswith(".sci_png_"))
@@ -966,11 +965,10 @@ class ExportFigureUnitTests(unittest.TestCase):
         )
 
         import json
-        import re
         jsx = bridge.jsx_calls[0]
-        match = re.search(r"var cfg = (\\{.*\\});", jsx)
-        self.assertIsNotNone(match)
-        config = json.loads(match.group(1))
+        config_start = jsx.index("var cfg = ") + len("var cfg = ")
+        config_end = jsx.index(";", config_start)
+        config = json.loads(jsx[config_start:config_end])
         for key in ("psd_temp_path", "tiff_temp_path", "png_temp_path"):
             temp_path = Path(config[key])
             self.assertLess(len(str(temp_path)), 240)
