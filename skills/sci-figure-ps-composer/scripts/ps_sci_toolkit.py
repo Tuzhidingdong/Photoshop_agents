@@ -1767,6 +1767,285 @@ def add_scale_bar(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Stage 5: recursive text-layer font normalization
+# ---------------------------------------------------------------------------
+
+def _build_unify_fonts_jsx(config: Dict[str, Any]) -> str:
+    """Build one native Photoshop JSX pass for recursive text normalization."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function makeColor(rgb) {
+        var color = new SolidColor();
+        color.rgb.red = rgb[0];
+        color.rgb.green = rgb[1];
+        color.rgb.blue = rgb[2];
+        return color;
+    }
+    function colorMatches(color, rgb) {
+        return (
+            Math.round(color.rgb.red) === rgb[0] &&
+            Math.round(color.rgb.green) === rgb[1] &&
+            Math.round(color.rgb.blue) === rgb[2]
+        );
+    }
+
+    var cfg = __SCI_UNIFY_FONTS_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var textLayerCount = 0;
+    var changedLayerCount = 0;
+    var layerPaths = [];
+    var response = "";
+
+    function processContainer(container, parentPath) {
+        var i;
+        for (i = 0; i < container.artLayers.length; i++) {
+            var layer = container.artLayers[i];
+            if (layer.kind !== LayerKind.TEXT) {
+                continue;
+            }
+
+            textLayerCount++;
+            var textItem = layer.textItem;
+
+            if (cfg.font_postscript !== null) {
+                textItem.font = cfg.font_postscript;
+                if (String(textItem.font) !== cfg.font_postscript) {
+                    throw new Error(
+                        "Font verification failed for " + parentPath + "/" + layer.name +
+                        ": expected " + cfg.font_postscript + ", got " + String(textItem.font)
+                    );
+                }
+            }
+
+            if (cfg.size_pt !== null) {
+                textItem.size = new UnitValue(cfg.size_pt, "pt");
+                var actualSize = textItem.size.as("pt");
+                if (Math.abs(actualSize - cfg.size_pt) > 0.05) {
+                    throw new Error(
+                        "Font-size verification failed for " + parentPath + "/" + layer.name +
+                        ": expected " + cfg.size_pt + " pt, got " + actualSize + " pt"
+                    );
+                }
+            }
+
+            if (cfg.color_rgb !== null) {
+                textItem.color = makeColor(cfg.color_rgb);
+                if (!colorMatches(textItem.color, cfg.color_rgb)) {
+                    throw new Error(
+                        "Text-color verification failed for " + parentPath + "/" + layer.name
+                    );
+                }
+            }
+
+            changedLayerCount++;
+            layerPaths.push(parentPath + "/" + layer.name);
+        }
+
+        for (var groupIndex = 0; groupIndex < container.layerSets.length; groupIndex++) {
+            var nestedGroup = container.layerSets[groupIndex];
+            processContainer(nestedGroup, parentPath + "/" + nestedGroup.name);
+        }
+    }
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var sourceFile = new File(cfg.input_path);
+        if (!sourceFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+
+        var outputFile = new File(cfg.output_path);
+        if (outputFile.exists) {
+            if (!cfg.overwrite) {
+                throw new Error(
+                    "Output already exists; set overwrite=true to replace it: " +
+                    cfg.output_path
+                );
+            }
+            if (!outputFile.remove()) {
+                throw new Error("Could not remove existing output file: " + cfg.output_path);
+            }
+        }
+
+        doc = app.open(sourceFile);
+        processContainer(doc, doc.name);
+
+        if (textLayerCount < 1) {
+            throw new Error("No editable Photoshop text layers were found in the document.");
+        }
+        if (changedLayerCount !== textLayerCount) {
+            throw new Error(
+                "Not every text layer was normalized: " + changedLayerCount +
+                " of " + textLayerCount
+            );
+        }
+
+        var psdOptions = new PhotoshopSaveOptions();
+        psdOptions.embedColorProfile = true;
+        psdOptions.maximizeCompatibility = true;
+        doc.saveAs(outputFile, psdOptions, true, Extension.LOWERCASE);
+
+        if (!outputFile.exists || outputFile.length <= 0) {
+            throw new Error("Photoshop did not create a non-empty font-normalized PSD.");
+        }
+
+        response = [
+            "SCI_PS_UNIFY_FONTS",
+            "OK",
+            clean(doc.name),
+            String(textLayerCount),
+            String(changedLayerCount),
+            cfg.font_postscript === null ? "" : clean(cfg.font_postscript),
+            cfg.size_pt === null ? "" : String(cfg.size_pt),
+            cfg.color_hex === null ? "" : cfg.color_hex,
+            outputFile.fsName,
+            layerPaths.join(";")
+        ].join("\t");
+
+    } catch (e) {
+        response = [
+            "SCI_PS_UNIFY_FONTS",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreError) {}
+        }
+        app.displayDialogs = previousDialogs;
+    }
+
+    return response;
+})();
+"""
+    return template.replace("__SCI_UNIFY_FONTS_CONFIG__", payload)
+
+
+def unify_fonts(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    font_postscript: Optional[str] = None,
+    size_pt: Optional[float] = None,
+    color_hex: Optional[str] = None,
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Normalize selected attributes of every editable text layer recursively.
+
+    Text layers are found in the document and every nested LayerSet. Any
+    attribute left as None is preserved. The source PSD is never saved in
+    place; the normalized document is saved to a separate PSD.
+    """
+    if font_postscript is None and size_pt is None and color_hex is None:
+        raise ValueError(
+            "Specify at least one of font_postscript, size_pt, or color_hex."
+        )
+    if font_postscript is not None:
+        if not isinstance(font_postscript, str) or not font_postscript.strip():
+            raise ValueError("font_postscript must be a non-empty Photoshop PostScript font name.")
+        if any(char in font_postscript for char in "\r\n\t"):
+            raise ValueError("font_postscript cannot contain tabs or newlines.")
+        font_postscript = font_postscript.strip()
+
+    normalized_size: Optional[float] = None
+    if size_pt is not None:
+        normalized_size = float(size_pt)
+        if not 1.0 <= normalized_size <= 200.0:
+            raise ValueError("size_pt must be between 1 and 200 points.")
+
+    color_rgb = _parse_hex_color(color_hex) if color_hex is not None else None
+
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".psd":
+        raise ValueError("output_path must end in .psd.")
+    if str(source_file).casefold() == str(output_file).casefold():
+        raise ValueError("output_path must differ from input_path; the source PSD is never modified.")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if output_file.exists() and not overwrite:
+        raise FileExistsError(
+            "Output already exists; pass overwrite=True to replace it: "
+            + str(output_file)
+        )
+
+    config = {
+        "input_path": str(source_file),
+        "output_path": str(output_file),
+        "font_postscript": font_postscript,
+        "size_pt": normalized_size,
+        "color_rgb": list(color_rgb) if color_rgb is not None else None,
+        "color_hex": color_hex.upper() if color_hex is not None else None,
+        "overwrite": bool(overwrite),
+    }
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    jsx = _build_unify_fonts_jsx(config)
+    raw = active_bridge.execute_jsx(jsx)
+    fields = _parse_protocol(
+        raw,
+        "SCI_PS_UNIFY_FONTS",
+        10,
+        "unify_fonts",
+        jsx,
+    )
+
+    text_layer_count = int(fields[3])
+    changed_layer_count = int(fields[4])
+    if text_layer_count < 1 or changed_layer_count != text_layer_count:
+        raise PhotoshopBridgeError(
+            "unify_fonts",
+            "Photoshop did not normalize every editable text layer: "
+            + repr(fields[3:5]),
+            exception_type="TextLayerCountMismatch",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+    if not output_file.is_file() or output_file.stat().st_size <= 0:
+        raise PhotoshopBridgeError(
+            "unify_fonts",
+            "Photoshop reported a save but the normalized PSD is missing or empty: "
+            + str(output_file),
+            exception_type="PsdSaveVerificationError",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    return {
+        "document_name": fields[2],
+        "text_layer_count": text_layer_count,
+        "changed_layer_count": changed_layer_count,
+        "font_postscript": fields[5] or None,
+        "font_size_pt": float(fields[6]) if fields[6] else None,
+        "color_hex": fields[7] or None,
+        "input_psd": str(source_file),
+        "saved_psd": str(output_file),
+        "layer_paths": fields[9].split(";") if fields[9] else [],
+        "passed": True,
+    }
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
@@ -1801,7 +2080,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -1873,6 +2152,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scale-label-size-pt", type=float, default=8.0)
     parser.add_argument("--scale-label-gap-pt", type=float, default=1.5)
     parser.add_argument("--scale-inset-cm", type=float, default=0.2)
+    parser.add_argument("--unify-font-postscript")
+    parser.add_argument("--unify-font-size-pt", type=float)
+    parser.add_argument("--unify-font-color", help="Hex text color, for example #000000.")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--json",
@@ -1921,6 +2203,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "unify-fonts":
+        if args.input_psd is None or args.output is None:
+            print(
+                "ERROR: --input-psd and --output are required for "
+                "--action unify-fonts.",
+                file=sys.stderr,
+            )
+            return 2
+        if not any((
+            args.unify_font_postscript is not None,
+            args.unify_font_size_pt is not None,
+            args.unify_font_color is not None,
+        )):
+            print(
+                "ERROR: specify at least one of --unify-font-postscript, "
+                "--unify-font-size-pt, or --unify-font-color.",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         bridge = PhotoshopBridge()
 
@@ -1962,6 +2264,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 label_size_pt=args.scale_label_size_pt,
                 label_gap_pt=args.scale_label_gap_pt,
                 inset_cm=args.scale_inset_cm,
+                overwrite=args.overwrite,
+                bridge=bridge,
+            )
+        elif args.action == "unify-fonts":
+            result = unify_fonts(
+                args.input_psd,
+                args.output,
+                font_postscript=args.unify_font_postscript,
+                size_pt=args.unify_font_size_pt,
+                color_hex=args.unify_font_color,
                 overwrite=args.overwrite,
                 bridge=bridge,
             )
