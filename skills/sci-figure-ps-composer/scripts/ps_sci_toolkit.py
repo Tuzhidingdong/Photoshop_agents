@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import hashlib
 import json
 import os
 import platform
+import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -2046,6 +2049,577 @@ def unify_fonts(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Stage 6: publication export bundle (editable PSD + LZW TIFF + PNG)
+# ---------------------------------------------------------------------------
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _inspect_export_raster(
+    path: Path,
+    *,
+    expected_format: str,
+    expected_size: tuple[int, int],
+    expected_dpi: float,
+) -> Dict[str, Any]:
+    """Read export metadata only; Pillow never modifies or re-encodes exports."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise PhotoshopBridgeError(
+            "export_figure",
+            "Pillow is required to inspect TIFF/PNG export metadata.",
+            exception_type="MissingDependency",
+        ) from exc
+
+    try:
+        with Image.open(str(path)) as image:
+            actual_format = str(image.format or "").upper()
+            if actual_format != expected_format.upper():
+                raise ValueError(
+                    "Expected " + expected_format + "; got " + actual_format
+                )
+            if image.mode != "RGB":
+                raise ValueError(
+                    expected_format + " must be RGB; got " + str(image.mode)
+                )
+            if tuple(image.size) != tuple(expected_size):
+                raise ValueError(
+                    expected_format + " dimensions differ from the source PSD: "
+                    + repr(image.size) + " vs " + repr(expected_size)
+                )
+
+            dpi_info = image.info.get("dpi")
+            if dpi_info is None and expected_format.upper() == "TIFF":
+                x_resolution = image.tag_v2.get(282)
+                y_resolution = image.tag_v2.get(283)
+                resolution_unit = image.tag_v2.get(296, 2)
+                if x_resolution is not None and y_resolution is not None:
+                    x_resolution = float(x_resolution[0]) / float(x_resolution[1]) if isinstance(x_resolution, tuple) else float(x_resolution)
+                    y_resolution = float(y_resolution[0]) / float(y_resolution[1]) if isinstance(y_resolution, tuple) else float(y_resolution)
+                    if int(resolution_unit) == 3:
+                        x_resolution *= 2.54
+                        y_resolution *= 2.54
+                    dpi_info = (x_resolution, y_resolution)
+
+            if dpi_info is None:
+                raise ValueError(expected_format + " is missing DPI metadata.")
+            if isinstance(dpi_info, (int, float)):
+                dpi_x = dpi_y = float(dpi_info)
+            else:
+                dpi_x = float(dpi_info[0])
+                dpi_y = float(dpi_info[1])
+
+            if abs(dpi_x - expected_dpi) > 0.5 or abs(dpi_y - expected_dpi) > 0.5:
+                raise ValueError(
+                    expected_format + " DPI mismatch: "
+                    + repr((dpi_x, dpi_y))
+                    + " vs " + str(expected_dpi)
+                )
+
+            compression = None
+            compression_tag = None
+            if expected_format.upper() == "TIFF":
+                compression_tag = int(image.tag_v2.get(259, 1))
+                compression = str(image.info.get("compression", ""))
+                if compression_tag != 5:
+                    raise ValueError(
+                        "TIFF compression tag must be 5 (LZW); got "
+                        + str(compression_tag) + " (" + compression + ")"
+                    )
+                if "lzw" not in compression.lower():
+                    # The numeric TIFF tag is authoritative; Pillow versions
+                    # differ in the human-readable compression string.
+                    compression = "tiff_lzw (verified by tag 259=5)"
+
+            return {
+                "path": str(path),
+                "format": actual_format,
+                "width_px": int(image.width),
+                "height_px": int(image.height),
+                "mode": image.mode,
+                "dpi_x": dpi_x,
+                "dpi_y": dpi_y,
+                "compression": compression,
+                "compression_tag": compression_tag,
+                "bytes": path.stat().st_size,
+            }
+    except Exception as exc:
+        raise PhotoshopBridgeError(
+            "export_figure",
+            "Export metadata verification failed for " + str(path) + ": " + str(exc),
+            exception_type=type(exc).__name__,
+        ) from exc
+
+
+def _build_export_figure_jsx(config: Dict[str, Any]) -> str:
+    """Build native Photoshop JSX for editable PSD-copy verification and raster exports."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function px(value) {
+        return value.as("px");
+    }
+    function modeName(doc) {
+        return doc.mode == DocumentMode.RGB ? "RGB" : String(doc.mode);
+    }
+    function verifyRaster(path, expectedName, expectedWidth, expectedHeight, expectedDpi) {
+        var file = new File(path);
+        if (!file.exists || file.length <= 0) {
+            throw new Error(expectedName + " export is missing or empty: " + path);
+        }
+
+        var exportDoc = null;
+        try {
+            exportDoc = app.open(file);
+            var width = px(exportDoc.width);
+            var height = px(exportDoc.height);
+            var dpi = Number(exportDoc.resolution);
+            var mode = modeName(exportDoc);
+
+            if (width !== expectedWidth || height !== expectedHeight) {
+                throw new Error(
+                    expectedName + " dimensions mismatch: " + width + "x" + height +
+                    " vs " + expectedWidth + "x" + expectedHeight
+                );
+            }
+            if (mode !== "RGB") {
+                throw new Error(expectedName + " is not RGB: " + mode);
+            }
+            if (Math.abs(dpi - expectedDpi) > 0.5) {
+                throw new Error(
+                    expectedName + " resolution mismatch: " + dpi + " vs " + expectedDpi
+                );
+            }
+
+            exportDoc.close(SaveOptions.DONOTSAVECHANGES);
+            exportDoc = null;
+            return {
+                width: width,
+                height: height,
+                dpi: dpi,
+                mode: mode
+            };
+        } finally {
+            if (exportDoc !== null) {
+                try {
+                    exportDoc.close(SaveOptions.DONOTSAVECHANGES);
+                } catch (closeError) {}
+            }
+        }
+    }
+    function inspectLayers(container, counts) {
+        for (var i = 0; i < container.artLayers.length; i++) {
+            var layer = container.artLayers[i];
+            if (layer.kind == LayerKind.SMARTOBJECT) {
+                counts.smart_objects++;
+            }
+            if (layer.kind == LayerKind.TEXT) {
+                counts.text_layers++;
+            }
+        }
+        for (var groupIndex = 0; groupIndex < container.layerSets.length; groupIndex++) {
+            inspectLayers(container.layerSets[groupIndex], counts);
+        }
+    }
+
+    var cfg = __SCI_EXPORT_FIGURE_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var sourceDoc = null;
+    var tiffDoc = null;
+    var pngDoc = null;
+    var response = "";
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var sourceFile = new File(cfg.input_path);
+        if (!sourceFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+        sourceDoc = app.open(sourceFile);
+        if (modeName(sourceDoc) !== "RGB") {
+            throw new Error("Publication export requires an RGB PSD; conversion is not performed automatically.");
+        }
+
+        var width = px(sourceDoc.width);
+        var height = px(sourceDoc.height);
+        var dpi = Number(sourceDoc.resolution);
+        if (!(Math.abs(dpi - 300) <= 0.5 || Math.abs(dpi - 600) <= 0.5)) {
+            throw new Error("Source PSD must be 300 or 600 DPI; got " + dpi + ".");
+        }
+        if (cfg.expected_dpi !== null && Math.abs(dpi - cfg.expected_dpi) > 0.5) {
+            throw new Error(
+                "Source PSD resolution does not match requested export DPI: " +
+                dpi + " vs " + cfg.expected_dpi
+            );
+        }
+
+        var counts = {
+            panel_groups: 0,
+            smart_objects: 0,
+            text_layers: 0
+        };
+        for (var groupIndex = 0; groupIndex < sourceDoc.layerSets.length; groupIndex++) {
+            if (sourceDoc.layerSets[groupIndex].name.indexOf("Group_Panel_") === 0) {
+                counts.panel_groups++;
+            }
+        }
+        inspectLayers(sourceDoc, counts);
+        if (counts.panel_groups < 1 || counts.smart_objects < 1) {
+            throw new Error(
+                "Source PSD does not contain the expected editable panel/Smart Object structure."
+            );
+        }
+
+        // TIFF: flatten only a duplicate. The source PSD and its Smart Objects
+        // remain open and untouched.
+        tiffDoc = sourceDoc.duplicate(cfg.document_name + "_TIFF_EXPORT", false);
+        app.activeDocument = tiffDoc;
+        tiffDoc.flatten();
+        var tiffOptions = new TiffSaveOptions();
+        tiffOptions.imageCompression = TIFFEncoding.TIFFLZW;
+        tiffOptions.embedColorProfile = true;
+        tiffOptions.layers = false;
+        tiffOptions.byteOrder = ByteOrder.IBM;
+        var tiffFile = new File(cfg.tiff_temp_path);
+        tiffDoc.saveAs(tiffFile, tiffOptions, true, Extension.LOWERCASE);
+        if (!tiffFile.exists || tiffFile.length <= 0) {
+            throw new Error("Photoshop did not create the LZW TIFF.");
+        }
+        tiffDoc.close(SaveOptions.DONOTSAVECHANGES);
+        tiffDoc = null;
+        app.activeDocument = sourceDoc;
+
+        // PNG: use another flattened duplicate so the TIFF save operation
+        // cannot alter the settings or state of the PNG export.
+        pngDoc = sourceDoc.duplicate(cfg.document_name + "_PNG_EXPORT", false);
+        app.activeDocument = pngDoc;
+        pngDoc.flatten();
+        var pngOptions = new PNGSaveOptions();
+        pngOptions.interlaced = false;
+        var pngFile = new File(cfg.png_temp_path);
+        pngDoc.saveAs(pngFile, pngOptions, true, Extension.LOWERCASE);
+        if (!pngFile.exists || pngFile.length <= 0) {
+            throw new Error("Photoshop did not create the PNG.");
+        }
+        pngDoc.close(SaveOptions.DONOTSAVECHANGES);
+        pngDoc = null;
+        app.activeDocument = sourceDoc;
+
+        // Reopen the byte-identical editable PSD copy and both raster exports
+        // inside Photoshop before Python checks TIFF LZW and metadata tags.
+        var psdCopyFile = new File(cfg.psd_temp_path);
+        if (!psdCopyFile.exists || psdCopyFile.length <= 0) {
+            throw new Error("Editable PSD copy is missing or empty.");
+        }
+        var copiedDoc = null;
+        try {
+            copiedDoc = app.open(psdCopyFile);
+            if (px(copiedDoc.width) !== width ||
+                px(copiedDoc.height) !== height ||
+                modeName(copiedDoc) !== "RGB" ||
+                Math.abs(Number(copiedDoc.resolution) - dpi) > 0.5) {
+                throw new Error("Editable PSD copy does not match the source document.");
+            }
+            var copyCounts = {
+                panel_groups: 0,
+                smart_objects: 0,
+                text_layers: 0
+            };
+            for (var copyGroup = 0; copyGroup < copiedDoc.layerSets.length; copyGroup++) {
+                if (copiedDoc.layerSets[copyGroup].name.indexOf("Group_Panel_") === 0) {
+                    copyCounts.panel_groups++;
+                }
+            }
+            inspectLayers(copiedDoc, copyCounts);
+            if (copyCounts.panel_groups !== counts.panel_groups ||
+                copyCounts.smart_objects !== counts.smart_objects ||
+                copyCounts.text_layers !== counts.text_layers) {
+                throw new Error("Editable PSD copy layer structure differs from source.");
+            }
+            copiedDoc.close(SaveOptions.DONOTSAVECHANGES);
+            copiedDoc = null;
+        } finally {
+            if (copiedDoc !== null) {
+                try {
+                    copiedDoc.close(SaveOptions.DONOTSAVECHANGES);
+                } catch (closeCopyError) {}
+            }
+        }
+        app.activeDocument = sourceDoc;
+
+        var tiffCheck = verifyRaster(
+            cfg.tiff_temp_path, "TIFF", width, height, dpi
+        );
+        app.activeDocument = sourceDoc;
+        var pngCheck = verifyRaster(
+            cfg.png_temp_path, "PNG", width, height, dpi
+        );
+        app.activeDocument = sourceDoc;
+
+        sourceDoc.close(SaveOptions.DONOTSAVECHANGES);
+        sourceDoc = null;
+
+        response = [
+            "SCI_PS_EXPORT_FIGURE",
+            "OK",
+            clean(cfg.document_name),
+            String(width),
+            String(height),
+            String(dpi),
+            "RGB",
+            String(counts.panel_groups),
+            String(counts.smart_objects),
+            String(counts.text_layers),
+            String(tiffCheck.width),
+            String(tiffCheck.height),
+            String(tiffCheck.dpi),
+            tiffCheck.mode,
+            String(pngCheck.width),
+            String(pngCheck.height),
+            String(pngCheck.dpi),
+            pngCheck.mode,
+            cfg.tiff_temp_path,
+            cfg.png_temp_path
+        ].join("\t");
+
+    } catch (e) {
+        response = [
+            "SCI_PS_EXPORT_FIGURE",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (tiffDoc !== null) {
+            try {
+                tiffDoc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeTiffError) {}
+        }
+        if (pngDoc !== null) {
+            try {
+                pngDoc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closePngError) {}
+        }
+        if (sourceDoc !== null) {
+            try {
+                sourceDoc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeSourceError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreError) {}
+        }
+        app.displayDialogs = previousDialogs;
+    }
+
+    return response;
+})();
+"""
+    return template.replace("__SCI_EXPORT_FIGURE_CONFIG__", payload)
+
+
+def export_figure(
+    input_path: str | Path,
+    output_dir: Optional[str | Path] = None,
+    *,
+    basename: Optional[str] = None,
+    expected_dpi: Optional[int] = None,
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Export an editable PSD copy, flattened RGB LZW TIFF, and RGB PNG.
+
+    Photoshop performs both raster exports from independent flattened
+    duplicates. Pillow is used only to inspect file format, dimensions, RGB
+    mode, DPI, and the TIFF compression tag; it does not re-encode outputs.
+    """
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+
+    if expected_dpi is not None and expected_dpi not in (300, 600):
+        raise ValueError("expected_dpi must be 300, 600, or None.")
+
+    export_dir = (
+        Path(output_dir).expanduser().resolve()
+        if output_dir is not None
+        else source_file.with_name(source_file.stem + "_exports")
+    )
+    if basename is None:
+        export_basename = source_file.stem
+    else:
+        export_basename = str(basename).strip()
+    invalid_chars = '<>:"/\\\\|?*'
+    if (
+        not export_basename
+        or export_basename in (".", "..")
+        or any(char in invalid_chars or ord(char) < 32 for char in export_basename)
+    ):
+        raise ValueError("basename must be a simple Windows-safe file name.")
+
+    export_dir.mkdir(parents=True, exist_ok=True)
+    psd_output = export_dir / (export_basename + ".psd")
+    tiff_output = export_dir / (export_basename + ".tif")
+    png_output = export_dir / (export_basename + ".png")
+
+    if str(source_file).casefold() in {
+        str(psd_output.resolve()).casefold(),
+        str(tiff_output.resolve()).casefold(),
+        str(png_output.resolve()).casefold(),
+    }:
+        raise ValueError("Export outputs must not overwrite the input PSD.")
+
+    existing_outputs = [path for path in (psd_output, tiff_output, png_output) if path.exists()]
+    if existing_outputs and not overwrite:
+        raise FileExistsError(
+            "Export output already exists; pass overwrite=True to replace: "
+            + ", ".join(str(path) for path in existing_outputs)
+        )
+
+    token = uuid.uuid4().hex
+    psd_temp = export_dir / ("." + export_basename + "." + token + ".tmp.psd")
+    tiff_temp = export_dir / ("." + export_basename + "." + token + ".tmp.tif")
+    png_temp = export_dir / ("." + export_basename + "." + token + ".tmp.png")
+
+    input_hash_before = _sha256_file(source_file)
+    temp_paths = (psd_temp, tiff_temp, png_temp)
+
+    try:
+        shutil.copy2(source_file, psd_temp)
+        if _sha256_file(psd_temp) != input_hash_before:
+            raise PhotoshopBridgeError(
+                "export_figure",
+                "The editable PSD staging copy does not match the input PSD.",
+                exception_type="PsdCopyHashMismatch",
+            )
+
+        config = {
+            "input_path": str(source_file),
+            "psd_temp_path": str(psd_temp),
+            "tiff_temp_path": str(tiff_temp),
+            "png_temp_path": str(png_temp),
+            "document_name": export_basename,
+            "expected_dpi": expected_dpi,
+        }
+
+        active_bridge = bridge if bridge is not None else PhotoshopBridge()
+        jsx = _build_export_figure_jsx(config)
+        raw = active_bridge.execute_jsx(jsx)
+        fields = _parse_protocol(
+            raw,
+            "SCI_PS_EXPORT_FIGURE",
+            20,
+            "export_figure",
+            jsx,
+        )
+
+        width_px = int(float(fields[3]))
+        height_px = int(float(fields[4]))
+        actual_dpi = float(fields[5])
+        if fields[6] != "RGB":
+            raise PhotoshopBridgeError(
+                "export_figure",
+                "Photoshop source mode is not RGB: " + fields[6],
+                exception_type="UnsupportedColorMode",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+        if expected_dpi is not None and abs(actual_dpi - expected_dpi) > 0.5:
+            raise PhotoshopBridgeError(
+                "export_figure",
+                "Source PSD DPI differs from expected_dpi.",
+                exception_type="DpiMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        tiff_metadata = _inspect_export_raster(
+            tiff_temp,
+            expected_format="TIFF",
+            expected_size=(width_px, height_px),
+            expected_dpi=actual_dpi,
+        )
+        png_metadata = _inspect_export_raster(
+            png_temp,
+            expected_format="PNG",
+            expected_size=(width_px, height_px),
+            expected_dpi=actual_dpi,
+        )
+
+        if _sha256_file(source_file) != input_hash_before:
+            raise PhotoshopBridgeError(
+                "export_figure",
+                "The source PSD changed during export; this must never happen.",
+                exception_type="SourcePsdModified",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        # Publish the bundle only after all three deliverables and both raster
+        # metadata checks have succeeded. os.replace keeps each final path
+        # from ever pointing at a partial write.
+        os.replace(psd_temp, psd_output)
+        os.replace(tiff_temp, tiff_output)
+        os.replace(png_temp, png_output)
+
+        psd_hash = _sha256_file(psd_output)
+        if psd_hash != input_hash_before:
+            raise PhotoshopBridgeError(
+                "export_figure",
+                "The published editable PSD is not byte-identical to the input.",
+                exception_type="PsdCopyHashMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        return {
+            "document_name": fields[2],
+            "width_px": width_px,
+            "height_px": height_px,
+            "dpi": actual_dpi,
+            "mode": fields[6],
+            "panel_group_count": int(fields[7]),
+            "smart_object_count": int(fields[8]),
+            "text_layer_count": int(fields[9]),
+            "editable_psd": {
+                "path": str(psd_output),
+                "bytes": psd_output.stat().st_size,
+                "sha256_matches_input": True,
+            },
+            "tiff": {
+                **tiff_metadata,
+                "path": str(tiff_output),
+            },
+            "png": {
+                **png_metadata,
+                "path": str(png_output),
+            },
+            "input_psd": str(source_file),
+            "input_sha256_unchanged": True,
+            "passed": True,
+        }
+    finally:
+        for temp_path in temp_paths:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
@@ -2080,7 +2654,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -2155,6 +2729,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unify-font-postscript")
     parser.add_argument("--unify-font-size-pt", type=float)
     parser.add_argument("--unify-font-color", help="Hex text color, for example #000000.")
+    parser.add_argument("--export-dir", type=Path)
+    parser.add_argument("--export-basename")
+    parser.add_argument("--export-dpi", type=int, choices=(300, 600))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--json",
@@ -2223,6 +2800,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "export-figure":
+        if args.input_psd is None:
+            print(
+                "ERROR: --input-psd is required for --action export-figure.",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         bridge = PhotoshopBridge()
 
@@ -2274,6 +2859,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                 font_postscript=args.unify_font_postscript,
                 size_pt=args.unify_font_size_pt,
                 color_hex=args.unify_font_color,
+                overwrite=args.overwrite,
+                bridge=bridge,
+            )
+        elif args.action == "export-figure":
+            result = export_figure(
+                args.input_psd,
+                args.export_dir,
+                basename=args.export_basename,
+                expected_dpi=args.export_dpi,
                 overwrite=args.overwrite,
                 bridge=bridge,
             )
