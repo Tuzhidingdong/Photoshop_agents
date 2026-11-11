@@ -27,6 +27,7 @@ from ps_sci_toolkit import (
     _inspect_export_raster,
     preflight_figure,
     inspect_psd,
+    _parse_psd_inspection_records,
     _validate_organize_plan,
     apply_organize_plan,
     _parse_organize_verify_records,
@@ -1078,12 +1079,15 @@ def _make_preflight_response(*, missing_first_smart_object=False):
 
 
 class FakeInspectBridge:
-    def __init__(self, response):
+    def __init__(self, response, callback=None):
         self.response = response
+        self.callback = callback
         self.jsx_calls = []
 
     def execute_jsx(self, jsx):
         self.jsx_calls.append(jsx)
+        if self.callback is not None:
+            self.callback(jsx)
         return self.response
 
 
@@ -1179,6 +1183,65 @@ class InspectPsdUnitTests(unittest.TestCase):
         self.assertEqual(saved["source_sha256"], result["source_sha256"])
         self.assertEqual(saved["layer_count"], 5)
         self.assertEqual(saved["report_path"], str(report_path))
+
+    def test_inspect_psd_can_generate_composite_and_layer_previews(self):
+        preview_dir = self.root / "visual_previews"
+        composite = preview_dir / "composite.png"
+        layer = preview_dir / "layer_01.png"
+        response = _make_inspection_response() + "\n" + "\n".join([
+            _encode_inspection_record(["PREVIEW", "__composite__", "PASS", str(composite), "Full composite preview"]),
+            _encode_inspection_record(["PREVIEW", "root/L0", "PASS", str(layer), "Isolated visible ArtLayer preview"]),
+        ])
+
+        def create_previews(_jsx):
+            preview_dir.mkdir()
+            composite.write_bytes(b"composite")
+            layer.write_bytes(b"layer")
+
+        bridge = FakeInspectBridge(response, callback=create_previews)
+        result = inspect_psd(
+            self.input_psd,
+            preview_dir=preview_dir,
+            preview_max_layers=8,
+            preview_max_dimension=1200,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["preview_dir"], str(preview_dir))
+        self.assertEqual(len(result["visual_previews"]), 2)
+        self.assertEqual(result["visual_previews"][0]["node_key"], "__composite__")
+        self.assertTrue(composite.is_file())
+        self.assertTrue(layer.is_file())
+        self.assertIn("PNGSaveOptions", bridge.jsx_calls[0])
+        self.assertIn("preview_max_dimension", bridge.jsx_calls[0])
+
+    def test_inspect_psd_refuses_to_overwrite_an_existing_preview_directory(self):
+        preview_dir = self.root / "previews"
+        preview_dir.mkdir()
+        existing = preview_dir / "keep.txt"
+        existing.write_text("keep", encoding="utf-8")
+        bridge = FakeInspectBridge(_make_inspection_response())
+
+        with self.assertRaises(FileExistsError):
+            inspect_psd(
+                self.input_psd,
+                preview_dir=preview_dir,
+                bridge=bridge,
+            )
+
+        self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_inspection_parser_accepts_preview_status_records(self):
+        preview = _encode_inspection_record([
+            "PREVIEW", "root/L2", "SKIP", "", "Clipping chain requires context"
+        ])
+        inspected = _parse_psd_inspection_records(
+            _make_inspection_response().split("\t", 2)[2] + "\n" + preview
+        )
+        self.assertEqual(inspected["previews"][0]["status"], "SKIP")
+        self.assertIsNone(inspected["previews"][0]["path"])
 
     def test_inspect_psd_does_not_overwrite_an_existing_report(self):
         report_path = self.root / "existing.json"
