@@ -113,8 +113,6 @@ After Stage 4 passes, run the Stage 5 recursive font-normalization integration t
 
 ~~~powershell
 python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
-python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
-python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 ~~~
 
 The Stage 5 demo creates a separate fixture PSD with an additional text layer nested two groups deep, then normalizes the font, point size, and color of every editable text layer into a new PSD. It reopens that output and verifies every text layer, including the nested test layer, as well as preservation of the four panel labels and scale-bar label. Both the supplied input PSD and the generated fixture PSD are checked for unchanged hashes.
@@ -126,6 +124,17 @@ python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5
 ~~~
 
 The Stage 6 test creates a new export folder containing a byte-identical editable PSD copy, a flattened RGB TIFF using LZW compression, and a flattened RGB PNG. Photoshop reopens the PSD/TIFF/PNG and verifies their dimensions, RGB mode, resolution, panel groups, Smart Objects, and text layers. Pillow reads—but does not rewrite—the raster exports to verify RGB mode, dimensions, DPI metadata, and TIFF compression tag 259 = 5 (LZW). The source PSD hash must remain unchanged.
+
+After Stage 6 passes, run the Stage 7 read-only publication preflight on the Stage 5 editable PSD and its Stage 6 export bundle:
+
+~~~powershell
+python tests/test_preflight_figure_demo.py \
+  --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd \
+  --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports \
+  --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
+~~~
+
+The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups, embedded Smart Objects, effective PPI, panel-label/text styling, scale-bar geometry, the known synthetic scale calibration, and the Stage 6 PSD/TIFF/PNG bundle. It never saves the inspected PSD. The demo intentionally permits warnings for the low-resolution synthetic panel rasters and the font-normalization test's 9 pt Arial text; use `--strict` to turn warnings into failures.
 
 ### Bridge behavior
 
@@ -353,7 +362,7 @@ Implement and test each feature separately. Keep the Python public API stable wh
 
 Every bridge failure must identify:
 
-- operation (connect, status, lock_units, execute_jsx, compose_grid, add_panel_labels, or add_scale_bar);
+- operation (connect, status, lock_units, execute_jsx, compose_grid, add_panel_labels, add_scale_bar, unify_fonts, export_figure, or preflight_figure);
 - Python exception class, if any;
 - original exception message;
 - JSX preview when applicable;
@@ -378,6 +387,7 @@ python tests/test_add_panel_labels_demo.py --input-psd path\\to\\Figure_Grid_Sta
 python tests/test_add_scale_bar_demo.py --input-psd path\\to\\Figure_Grid_Stage2_Stage3_Labeled.psd
 python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
 python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
+python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Stage 2 and Stage 3 integration passes additionally require the respective saved PSDs to be reopened in Photoshop and their native document/layer structures to be inspected. Unit tests alone are not proof of Photoshop compatibility.
