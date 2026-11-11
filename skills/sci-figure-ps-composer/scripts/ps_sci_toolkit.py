@@ -5827,6 +5827,44 @@ def _validate_classification_report(
                 "type": evidence_type,
                 "observation": observation.strip(),
             }
+            source_layer = layer_by_key[key]
+            if evidence_type == "layer_name":
+                if observation.strip() != source_layer["name"]:
+                    raise ValueError(
+                        "layer_name evidence must quote the exact inspected layer name: " + key
+                    )
+                normalized_item["observed_name"] = source_layer["name"]
+            elif evidence_type == "layer_type":
+                if observation.strip() not in (
+                    source_layer["kind"], source_layer["typename"]
+                ):
+                    raise ValueError(
+                        "layer_type evidence does not match the inspected node type: " + key
+                    )
+                normalized_item["observed_kind"] = source_layer["kind"]
+            elif evidence_type == "geometry":
+                observed_bounds = evidence_item.get("bounds_px")
+                actual_bounds = source_layer.get("bounds_px")
+                if (
+                    not isinstance(observed_bounds, list)
+                    or not isinstance(actual_bounds, list)
+                    or len(observed_bounds) != 4
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in observed_bounds
+                    )
+                    or any(
+                        actual is None
+                        or abs(float(observed) - float(actual)) > 0.01
+                        for observed, actual in zip(observed_bounds, actual_bounds)
+                    )
+                ):
+                    raise ValueError(
+                        "geometry evidence bounds_px do not match the inspected layer: " + key
+                    )
+                normalized_item["bounds_px"] = actual_bounds
             if evidence_type == "visual_preview":
                 preview_key = evidence_item.get("preview_node_key", key)
                 if preview_key != key:
@@ -5857,6 +5895,11 @@ def _validate_classification_report(
                         "text_content evidence requires a native text layer with readable contents: "
                         + key
                     )
+                if observation.strip() not in str(layer_text["contents"]):
+                    raise ValueError(
+                        "text_content evidence must quote text actually present in the native text layer: "
+                        + key
+                    )
                 normalized_item["observed_text"] = layer_text["contents"]
             elif evidence_type == "user_instruction":
                 source = evidence_item.get("source")
@@ -5875,6 +5918,18 @@ def _validate_classification_report(
         if role in ("panel_image", "legend", "axis", "decoration") and not has_visual_evidence:
             warnings.append(
                 key + " uses a visual semantic role without visual evidence."
+            )
+        if role == "panel_group" and source_layer["typename"] != "LayerSet":
+            raise ValueError("panel_group role requires a LayerSet: " + key)
+        if role == "panel_image" and (
+            source_layer["typename"] != "ArtLayer"
+            or source_layer["kind"] == "LayerKind.TEXT"
+        ):
+            raise ValueError("panel_image role requires a non-text ArtLayer: " + key)
+        if role in ("panel_label", "scale_label", "axis_label") and source_layer["kind"] != "LayerKind.TEXT":
+            warnings.append(
+                key + " is classified as " + role
+                + " but is not an editable native text layer."
             )
 
         role_counts[role] = role_counts.get(role, 0) + 1
