@@ -21,6 +21,7 @@ from ps_sci_toolkit import (
     add_scale_bar,
     _panel_label_text,
     _physical_scale_width_px,
+    unify_fonts,
 )
 
 
@@ -593,6 +594,164 @@ class ScaleBarUnitTests(unittest.TestCase):
                 bridge=bridge,
             )
         self.assertEqual(bridge.jsx_calls, [])
+
+
+class FakeUnifyFontsBridge:
+    def __init__(self, output_path, response):
+        self.output_path = Path(output_path)
+        self.response = response
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        self.output_path.write_bytes(b"mock-font-normalized-psd")
+        return self.response
+
+
+class UnifyFontsUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Figure_ScaleBar.psd"
+        self.output_psd = self.root / "Figure_FontsUnified.psd"
+        self.input_psd.write_bytes(b"source-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _bridge(
+        self,
+        *,
+        output=None,
+        font="Arial-BoldMT",
+        size="9",
+        color="#000000",
+        text_count="6",
+        changed_count="6",
+    ):
+        output = Path(output or self.output_psd)
+        response = (
+            "SCI_PS_UNIFY_FONTS\tOK\tFigure_FontsUnified\t" +
+            text_count + "\t" + changed_count + "\t" +
+            font + "\t" + size + "\t" + color + "\t" +
+            str(output) + "\tGroup_Panel_a/Panel_Label_a;Group_Panel_b/Nested/Test"
+        )
+        return FakeUnifyFontsBridge(output, response)
+
+    def test_unify_fonts_recursively_targets_native_text_layers(self):
+        source_before = self.input_psd.read_bytes()
+        bridge = self._bridge()
+        result = unify_fonts(
+            self.input_psd,
+            self.output_psd,
+            font_postscript="Arial-BoldMT",
+            size_pt=9,
+            color_hex="#000000",
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["text_layer_count"], 6)
+        self.assertEqual(result["changed_layer_count"], 6)
+        self.assertEqual(result["font_postscript"], "Arial-BoldMT")
+        self.assertEqual(result["font_size_pt"], 9.0)
+        self.assertEqual(result["color_hex"], "#000000")
+        self.assertEqual(len(result["layer_paths"]), 2)
+        self.assertEqual(self.input_psd.read_bytes(), source_before)
+        self.assertEqual(self.output_psd.read_bytes(), b"mock-font-normalized-psd")
+
+        jsx = bridge.jsx_calls[0]
+        self.assertIn("function processContainer(container, parentPath)", jsx)
+        self.assertIn("container.artLayers", jsx)
+        self.assertIn("container.layerSets", jsx)
+        self.assertIn("LayerKind.TEXT", jsx)
+        self.assertIn('new UnitValue(cfg.size_pt, "pt")', jsx)
+        self.assertIn("textItem.font = cfg.font_postscript", jsx)
+        self.assertIn("textItem.color = makeColor(cfg.color_rgb)", jsx)
+        self.assertIn("doc.saveAs(outputFile", jsx)
+        self.assertIn("doc.close(SaveOptions.DONOTSAVECHANGES)", jsx)
+
+    def test_unify_fonts_can_selectively_change_only_one_attribute(self):
+        bridge = self._bridge(font="ArialMT", size="", color="")
+        result = unify_fonts(
+            self.input_psd,
+            self.output_psd,
+            font_postscript="ArialMT",
+            bridge=bridge,
+        )
+        self.assertEqual(result["font_postscript"], "ArialMT")
+        self.assertIsNone(result["font_size_pt"])
+        self.assertIsNone(result["color_hex"])
+        self.assertIn('"size_pt":null', bridge.jsx_calls[0])
+        self.assertIn('"color_rgb":null', bridge.jsx_calls[0])
+
+    def test_unify_fonts_rejects_no_requested_attributes(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            unify_fonts(self.input_psd, self.output_psd, bridge=bridge)
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_unify_fonts_rejects_source_overwrite(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            unify_fonts(
+                self.input_psd,
+                self.input_psd,
+                font_postscript="ArialMT",
+                overwrite=True,
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_unify_fonts_rejects_existing_output_without_overwrite(self):
+        self.output_psd.write_bytes(b"keep")
+        bridge = self._bridge()
+        with self.assertRaises(FileExistsError):
+            unify_fonts(
+                self.input_psd,
+                self.output_psd,
+                size_pt=9,
+                bridge=bridge,
+            )
+        self.assertEqual(self.output_psd.read_bytes(), b"keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_unify_fonts_validates_font_size_and_color(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            unify_fonts(
+                self.input_psd,
+                self.output_psd,
+                size_pt=0,
+                bridge=bridge,
+            )
+        with self.assertRaises(ValueError):
+            unify_fonts(
+                self.input_psd,
+                self.output_psd,
+                color_hex="black",
+                bridge=bridge,
+            )
+        with self.assertRaises(ValueError):
+            unify_fonts(
+                self.input_psd,
+                self.output_psd,
+                font_postscript="Arial\tMT",
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_unify_fonts_rejects_incomplete_photoshop_response(self):
+        bridge = self._bridge(text_count="6", changed_count="5")
+        with self.assertRaises(Exception):
+            unify_fonts(
+                self.input_psd,
+                self.output_psd,
+                size_pt=9,
+                bridge=bridge,
+            )
+
+
 
 
 
