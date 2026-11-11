@@ -576,10 +576,16 @@ def _build_compose_grid_jsx(config: Dict[str, Any]) -> str:
                 whiteTopLeft = false;
             }
 
+            // Trim using exactly one mode. Photoshop can reject the
+            // TRANSPARENT trim command when an opaque RGB/white-background
+            // image has no transparent border. The top-left color trim is
+            // sufficient for opaque white-margin exports; alpha-based
+            // sources use the transparent-pixel trim instead.
             if (whiteTopLeft) {
                 smartDoc.trim(TrimType.TOPLEFT, true, true, true, true);
+            } else {
+                smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true);
             }
-            smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true);
 
             var newWidth = px(smartDoc.width);
             var newHeight = px(smartDoc.height);
@@ -727,13 +733,28 @@ def _build_compose_grid_jsx(config: Dict[str, Any]) -> str:
 
     } catch (e) {
         var errorLine = (e.line === undefined) ? "" : e.line;
+        var partialDocument = doc === null ? "NO_DOCUMENT" : clean(doc.name);
+
+        // The document was created by this compose operation. If composition
+        // fails, close that partial document without saving so it cannot be
+        // mistaken for a valid figure or leave Photoshop in a dirty state.
+        if (doc !== null) {
+            try {
+                app.activeDocument = doc;
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+                partialDocument = "CLOSED_PARTIAL_DOCUMENT";
+            } catch (closeError) {
+                partialDocument = "PARTIAL_DOCUMENT_REMAINS:" + clean(closeError.message);
+            }
+        }
+
         return [
             "SCI_PS_COMPOSE",
             "ERROR",
             clean(e.name),
             clean(e.message),
             clean(errorLine),
-            doc === null ? "NO_DOCUMENT" : "PARTIAL_DOCUMENT:" + clean(doc.name)
+            partialDocument
         ].join("\t");
     } finally {
         app.displayDialogs = previousDialogs;
