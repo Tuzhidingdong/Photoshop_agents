@@ -1371,16 +1371,13 @@ def _make_valid_classification(inspection):
                 "observation": layer["name"],
             }]
         elif layer["kind"] == "LayerKind.TEXT":
-            if layer["name"].startswith("Panel_Label_"):
-                role = "panel_label"
-            else:
-                role = "unknown"
+            role = "title" if layer["name"] == "Title" else "annotation"
             evidence = [{
                 "type": "text_content",
                 "observation": layer["text"]["contents"],
             }]
         elif layer["kind"] == "LayerKind.SMARTOBJECT":
-            role = "panel_image" if layer["name"].startswith("Image_Panel_") else "unknown"
+            role = "panel_image"
             evidence = [{
                 "type": "visual_preview",
                 "preview_node_key": layer["node_key"],
@@ -1441,8 +1438,8 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["layer_count"], 5)
         self.assertEqual(result["classified_count"], 5)
-        self.assertEqual(result["role_counts"]["unknown"], 1)
-        self.assertEqual(result["role_counts"]["panel_label"], 1)
+        self.assertEqual(result["role_counts"]["unknown"], 2)
+        self.assertEqual(result["role_counts"]["title"], 1)
         self.assertEqual(len(result["classification_sha256"]), 64)
         self.assertTrue(result["source_sha256"] == self.inspection["source_sha256"])
 
