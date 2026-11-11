@@ -245,8 +245,11 @@ class ComposeGridUnitTests(unittest.TestCase):
         self.assertTrue(result["auto_trim"])
         self.assertIn('executeAction(charIDToTypeID("Plc ")', bridge.jsx_calls[0])
         self.assertIn('placedLayerEditContents', bridge.jsx_calls[0])
-        self.assertIn('TrimType.TOPLEFT', bridge.jsx_calls[0])
-        self.assertIn('TrimType.TRANSPARENT', bridge.jsx_calls[0])
+        self.assertIn('if (whiteTopLeft)', bridge.jsx_calls[0])
+        self.assertIn('smartDoc.trim(TrimType.TOPLEFT, true, true, true, true)', bridge.jsx_calls[0])
+        self.assertIn('smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true)', bridge.jsx_calls[0])
+        self.assertIn('} else {', bridge.jsx_calls[0])
+        self.assertIn('doc.close(SaveOptions.DONOTSAVECHANGES)', bridge.jsx_calls[0])
         self.assertIn('Group_Panel_a', bridge.jsx_calls[0])
         self.assertEqual(original_sizes, [path.stat().st_size for path in self.images])
 
