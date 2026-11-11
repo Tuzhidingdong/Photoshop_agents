@@ -1276,7 +1276,9 @@ class PreviewPsdLayersTests(unittest.TestCase):
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
         self.assertTrue(result["source_sha256_unchanged"])
         self.assertIn("restoreGroupChildren", bridge.jsx_calls[-1])
-        self.assertIn("previewDoc.duplicate", bridge.jsx_calls[-1])
+        self.assertIn('sourceDoc.duplicate("SCI_PSD_COMPOSITE_PREVIEW"', bridge.jsx_calls[-1])
+        self.assertIn('sourceDoc.duplicate(\n                    "SCI_Layer_Preview_"', bridge.jsx_calls[-1])
+        self.assertTrue(Path(result["composite_preview"]).is_file())
         self.assertIn("ResampleMethod.BICUBICSHARPER", bridge.jsx_calls[-1])
         self.assertIn("SaveOptions.DONOTSAVECHANGES", bridge.jsx_calls[-1])
 
