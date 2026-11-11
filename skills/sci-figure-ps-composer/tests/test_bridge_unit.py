@@ -17,6 +17,8 @@ from ps_sci_toolkit import (
     cm_to_pixels,
     compose_grid,
     _detect_trim_steps,
+    add_panel_labels,
+    _panel_label_text,
 )
 
 
@@ -295,6 +297,139 @@ class ComposeGridUnitTests(unittest.TestCase):
 
         self.assertEqual(output.read_bytes(), b"keep")
         self.assertEqual(bridge.jsx_calls, [])
+
+
+class FakeLabelBridge:
+    def __init__(self, output_path, response):
+        self.output_path = Path(output_path)
+        self.response = response
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        self.output_path.write_bytes(b"mock-labeled-psd")
+        return self.response
+
+
+class PanelLabelUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Figure_Grid.psd"
+        self.output_psd = self.root / "Figure_Grid_Labeled.psd"
+        self.input_psd.write_bytes(b"source-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _bridge(self):
+        response = (
+            "SCI_PS_LABELS\tOK\tFigure_Grid_Labeled\t4\t4\tlowercase\t"
+            "Group_Panel_d=d,Group_Panel_c=c,Group_Panel_b=b,Group_Panel_a=a\t"
+            + str(self.output_psd)
+        )
+        return FakeLabelBridge(self.output_psd, response)
+
+    def test_panel_label_styles(self):
+        self.assertEqual(_panel_label_text("a", "lowercase"), "a")
+        self.assertEqual(_panel_label_text("b", "uppercase"), "B")
+        self.assertEqual(_panel_label_text("aa", "parenthesized"), "(aa)")
+        with self.assertRaises(ValueError):
+            _panel_label_text("panel-a", "lowercase")
+
+    def test_add_panel_labels_builds_native_editable_text_layers(self):
+        source_before = self.input_psd.read_bytes()
+        bridge = self._bridge()
+
+        result = add_panel_labels(
+            self.input_psd,
+            self.output_psd,
+            style="lowercase",
+            size_pt=10,
+            inset_cm=0.1,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["panel_group_count"], 4)
+        self.assertEqual(result["labels_created"], 4)
+        self.assertEqual(result["style"], "lowercase")
+        self.assertEqual(result["font_postscript"], "Arial-BoldMT")
+        self.assertEqual(result["font_size_pt"], 10)
+        self.assertEqual(result["color_hex"], "#000000")
+        self.assertEqual(self.input_psd.read_bytes(), source_before)
+        self.assertEqual(self.output_psd.read_bytes(), b"mock-labeled-psd")
+
+        jsx = bridge.jsx_calls[0]
+        self.assertIn("LayerKind.TEXT", jsx)
+        self.assertIn("Panel_Label_", jsx)
+        self.assertIn('new UnitValue(cfg.size_pt, "pt")', jsx)
+        self.assertIn("Arial-BoldMT", jsx)
+        self.assertIn("textItem.position", jsx)
+        self.assertIn("doc.saveAs(outputFile", jsx)
+        self.assertIn("doc.close(SaveOptions.DONOTSAVECHANGES)", jsx)
+
+    def test_add_panel_labels_supports_uppercase_and_parenthesized(self):
+        for style, expected in (
+            ("uppercase", "uppercase"),
+            ("parenthesized", "parenthesized"),
+        ):
+            with self.subTest(style=style):
+                output = self.root / (style + ".psd")
+                response = (
+                    "SCI_PS_LABELS\tOK\tLabeled\t4\t4\t" + expected +
+                    "\tGroup_Panel_a=x\t" + str(output)
+                )
+                bridge = FakeLabelBridge(output, response)
+                result = add_panel_labels(
+                    self.input_psd,
+                    output,
+                    style=style,
+                    bridge=bridge,
+                )
+                self.assertEqual(result["style"], style)
+
+    def test_add_panel_labels_rejects_source_overwrite(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            add_panel_labels(
+                self.input_psd,
+                self.input_psd,
+                overwrite=True,
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_add_panel_labels_rejects_existing_output_without_overwrite(self):
+        self.output_psd.write_bytes(b"keep")
+        bridge = self._bridge()
+        with self.assertRaises(FileExistsError):
+            add_panel_labels(
+                self.input_psd,
+                self.output_psd,
+                bridge=bridge,
+            )
+        self.assertEqual(self.output_psd.read_bytes(), b"keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_add_panel_labels_validates_size_and_color(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            add_panel_labels(
+                self.input_psd,
+                self.output_psd,
+                size_pt=9,
+                bridge=bridge,
+            )
+        with self.assertRaises(ValueError):
+            add_panel_labels(
+                self.input_psd,
+                self.output_psd,
+                color_hex="black",
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
 
 
 if __name__ == "__main__":
