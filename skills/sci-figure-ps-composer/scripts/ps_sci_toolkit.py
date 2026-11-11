@@ -4169,6 +4169,29 @@ def _validate_organize_plan(
     source_layers = {
         layer["node_key"]: layer for layer in inspection.get("layers", [])
     }
+
+    def participates_in_clipping_chain(key: str) -> bool:
+        layer = source_layers[key]
+        if layer["clipped_to_below"]:
+            return True
+        siblings = sorted(
+            (
+                item for item in source_layers.values()
+                if item["parent_key"] == layer["parent_key"]
+            ),
+            key=lambda item: item["stack_index"],
+        )
+        position = next(
+            index for index, item in enumerate(siblings)
+            if item["node_key"] == key
+        )
+        # In Photoshop's front-to-back layer order, clipped layers sit above
+        # the base layer they clip to. Moving/reordering that base can detach
+        # the clipping relationship just as moving a clipped layer can.
+        return any(
+            sibling["clipped_to_below"]
+            for sibling in siblings[:position]
+        )
     operations = plan.get("operations")
     if not isinstance(operations, list) or not operations:
         raise ValueError("Organizer plan must contain a non-empty operations array.")
@@ -4265,8 +4288,8 @@ def _validate_organize_plan(
                     raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
                 if layer["is_background"] or layer["all_locked"] or layer["position_locked"]:
                     raise ValueError("Locked/background layer cannot be moved: " + target)
-                if layer["clipped_to_below"]:
-                    raise ValueError("Clipping-mask layers cannot be moved in organizer v1: " + target)
+                if participates_in_clipping_chain(target):
+                    raise ValueError("Layers participating in clipping-mask chains cannot be moved in organizer v1: " + target)
                 if operation.get("expected_name") != layer["name"]:
                     raise ValueError("move_layer.expected_name no longer matches " + target)
                 destination = operation.get("destination")
@@ -4301,14 +4324,14 @@ def _validate_organize_plan(
                     raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
                 if layer["is_background"] or layer["all_locked"] or layer["position_locked"]:
                     raise ValueError("Locked/background layer cannot be reordered: " + target)
-                if layer["clipped_to_below"]:
-                    raise ValueError("Clipping-mask layers cannot be reordered in organizer v1: " + target)
+                if participates_in_clipping_chain(target):
+                    raise ValueError("Layers participating in clipping-mask chains cannot be reordered in organizer v1: " + target)
                 if operation.get("expected_name") != layer["name"]:
                     raise ValueError("reorder_layer.expected_name no longer matches " + target)
                 if operation.get("relative_expected_name") != relative_layer["name"]:
                     raise ValueError("reorder_layer.relative_expected_name no longer matches " + relative)
-                if relative_layer["clipped_to_below"]:
-                    raise ValueError("reorder_layer cannot use a clipping-mask layer as its reference.")
+                if participates_in_clipping_chain(relative):
+                    raise ValueError("reorder_layer cannot use a layer participating in a clipping-mask chain as its reference.")
                 if layer["parent_key"] != relative_layer["parent_key"]:
                     raise ValueError("reorder_layer references must be siblings.")
                 if operation.get("position") not in ("before", "after"):
@@ -4335,10 +4358,38 @@ def _validate_organize_plan(
 
         normalized.append(operation)
 
-    # A move target cannot also be the reference layer in a reorder operation:
-    # the relationship would depend on operation order and is therefore rejected.
+    # Group-to-group moves are checked as one final parent graph, not only
+    # one operation at a time, so two individually plausible moves cannot
+    # create a cycle when combined.
+    planned_group_parents = {
+        key: layer["parent_key"]
+        for key, layer in source_layers.items()
+        if layer["typename"] == "LayerSet"
+    }
+    planned_group_parents.update(group_parents)
+    for operation in normalized:
+        if operation["action"] == "move_layer":
+            target_key = operation["target"]
+            if source_layers[target_key]["typename"] == "LayerSet":
+                planned_group_parents[target_key] = operation["destination"]
+
+    for group_key in planned_group_parents:
+        visited: set[str] = set()
+        current = group_key
+        while current != "root":
+            if current in visited:
+                raise ValueError("Organizer plan would create a LayerSet parent cycle at " + current)
+            visited.add(current)
+            current = planned_group_parents.get(current)
+            if current is None:
+                raise ValueError("Organizer plan references an invalid LayerSet parent.")
+
+    # Reordering cannot use a reference layer that will be moved/reordered,
+    # and a target cannot be moved then reordered in separate plan sections.
     for operation in normalized:
         if operation["action"] == "reorder_layer":
+            if operation["target"] in moved:
+                raise ValueError("reorder_layer target cannot also be moved.")
             if operation["relative_to"] in moved or operation["relative_to"] in reordered:
                 raise ValueError("reorder_layer relative_to cannot itself be moved/reordered.")
 
