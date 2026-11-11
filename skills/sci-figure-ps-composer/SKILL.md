@@ -247,7 +247,7 @@ python scripts/ps_sci_toolkit.py --action inspect-psd `
   --execution-mode quiet
 ~~~
 
-`inspect_psd` is read-only. It records the document geometry/profile and recursively enumerates the Photoshop `Document.layers` / `LayerSet.layers` collection so interleaved ArtLayer and LayerSet stacking order is retained. Each node contains a stable-within-this-source `node_key` derived from its ordered tree position, parent key, path, name, kind, visibility, opacity, blend mode, lock/clipping flags, pixel bounds, and editable text properties when applicable. The report includes the source PSD SHA-256 and a layer-tree fingerprint.
+`inspect_psd` is read-only. It first copies the saved on-disk PSD byte-for-byte to a unique temporary file and inspects that copy, then verifies the original source SHA-256 remains unchanged. This deliberately excludes unsaved in-memory changes in an already-open Photoshop document: save the intended version to disk before inspection. The temporary copy name is hidden from layer paths; the report uses the original PSD filename. It records document geometry/profile and recursively enumerates the Photoshop `Document.layers` / `LayerSet.layers` collection so interleaved ArtLayer and LayerSet stacking order is retained. Each node contains a stable-within-this-source `node_key` derived from its ordered tree position, parent key, path, name, kind, visibility, opacity, blend mode, lock/clipping flags, pixel bounds, and editable text properties when applicable. The report includes the source PSD SHA-256 and a layer-tree fingerprint.
 
 Node keys are valid only for the inspected source hash and tree fingerprint. They must not be reused after renaming, moving, adding, deleting, or reordering source layers. Run inspection again after any source change.
 
@@ -306,7 +306,7 @@ Supported operations are:
 - `reorder_layer`: move a node `before` or `after` an existing sibling.
 - `set_visibility`: explicitly set `visible` to true or false.
 
-All `create_group` operations must appear first. The executor then applies renames, moves, reorders, and visibility changes in that order. Every `expected_name` and `relative_expected_name` refers to the original inspection report, even when the same plan also renames that layer. It rejects stale hashes, unknown node keys, ambiguous or unsafe parent relationships, background/locked/position-locked/clipping-mask moves, and cycles such as moving a group into itself or a descendant.
+All `create_group` operations must appear first. The executor then applies renames, moves, reorders, and visibility changes in that order. Every `expected_name` and `relative_expected_name` refers to the original inspection report, even when the same plan also renames that layer. It rejects stale hashes, unknown node keys, ambiguous or unsafe parent relationships, background/locked/position-locked/clipping-chain moves or reorders, and individual or combined group-parent cycles. New root-level groups and moves are placed above Photoshop's locked Background layer.
 
 Apply only after approval:
 
