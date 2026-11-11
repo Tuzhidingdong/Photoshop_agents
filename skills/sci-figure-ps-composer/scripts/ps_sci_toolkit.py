@@ -4103,6 +4103,744 @@ def inspect_psd(
     return report
 
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 8B: approved, non-destructive existing-PSD organization plans
+# ---------------------------------------------------------------------------
+
+
+def _load_organize_plan(plan: Dict[str, Any] | str | Path) -> Dict[str, Any]:
+    if isinstance(plan, (str, Path)):
+        plan_path = Path(plan).expanduser().resolve(strict=True)
+        if not plan_path.is_file() or plan_path.suffix.lower() != ".json":
+            raise ValueError("plan_path must be an existing JSON file.")
+        loaded = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+    elif isinstance(plan, dict):
+        loaded = json.loads(json.dumps(plan, ensure_ascii=False))
+    else:
+        raise ValueError("plan must be a dictionary or a JSON file path.")
+    if not isinstance(loaded, dict):
+        raise ValueError("Organizer plan must be a JSON object.")
+    return loaded
+
+
+def _valid_layer_name(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(field + " must be a string.")
+    name = value.strip()
+    if not name or len(name) > 255 or any(ord(char) < 32 for char in name):
+        raise ValueError(field + " must be 1–255 printable characters.")
+    return name
+
+
+def _validate_organize_plan(
+    plan: Dict[str, Any],
+    inspection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate source identity, exact layer references, and safe structure-only operations."""
+    if plan.get("schema_version") != 1:
+        raise ValueError("Unsupported organizer plan schema_version; expected 1.")
+    if plan.get("source_sha256") != inspection.get("source_sha256"):
+        raise ValueError("Organizer plan source_sha256 does not match the current PSD.")
+    if plan.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+        raise ValueError("Organizer plan layer_tree_sha256 does not match the current PSD.")
+
+    source_layers = {
+        layer["node_key"]: layer for layer in inspection.get("layers", [])
+    }
+    operations = plan.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("Organizer plan must contain a non-empty operations array.")
+
+    existing_keys = set(source_layers)
+    group_parents: Dict[str, str] = {}
+    normalized: list[Dict[str, Any]] = []
+    source_ref_keys: set[str] = set()
+    renamed: set[str] = set()
+    moved: set[str] = set()
+    reordered: set[str] = set()
+    visibility_set: set[str] = set()
+    non_create_started = False
+
+    def require_layer(key: Any, field: str) -> Dict[str, Any]:
+        if not isinstance(key, str) or key not in source_layers:
+            raise ValueError(field + " must reference an inspected source node_key.")
+        source_ref_keys.add(key)
+        return source_layers[key]
+
+    def require_group_parent(key: Any, field: str) -> str:
+        if key == "root":
+            return "root"
+        if key in group_parents:
+            return key
+        layer = require_layer(key, field)
+        if layer["typename"] != "LayerSet":
+            raise ValueError(field + " must reference root, a LayerSet, or an earlier created group.")
+        return key
+
+    def destination_is_inside_target(destination: str, target_key: str) -> bool:
+        current = destination
+        while current != "root":
+            if current == target_key:
+                return True
+            if current in group_parents:
+                current = group_parents[current]
+            else:
+                parent_layer = source_layers.get(current)
+                if parent_layer is None:
+                    return False
+                current = parent_layer["parent_key"]
+        return False
+
+    for index, raw_operation in enumerate(operations):
+        if not isinstance(raw_operation, dict):
+            raise ValueError("Organizer operation " + str(index) + " must be an object.")
+        operation = dict(raw_operation)
+        action = operation.get("action")
+
+        if action == "create_group":
+            if non_create_started:
+                raise ValueError("create_group operations must appear before layer operations.")
+            key = operation.get("key")
+            if (
+                not isinstance(key, str)
+                or not key
+                or not key[0].isalpha()
+                or not key.replace("_", "").replace("-", "").isalnum()
+                or len(key) > 64
+                or key in group_parents
+                or key in existing_keys
+            ):
+                raise ValueError("create_group key must be unique and use letters, numbers, '_' or '-'.")
+            parent = require_group_parent(operation.get("parent", "root"), "create_group.parent")
+            name = _valid_layer_name(operation.get("name"), "create_group.name")
+            group_parents[key] = parent
+            operation["parent"] = parent
+            operation["name"] = name
+
+        else:
+            non_create_started = True
+            if action == "rename_layer":
+                target = operation.get("target")
+                layer = require_layer(target, "rename_layer.target")
+                if target in renamed:
+                    raise ValueError("A layer may be renamed only once in one plan: " + target)
+                expected_name = operation.get("expected_name")
+                if expected_name != layer["name"]:
+                    raise ValueError("rename_layer.expected_name no longer matches " + target)
+                operation["new_name"] = _valid_layer_name(
+                    operation.get("new_name"), "rename_layer.new_name"
+                )
+                renamed.add(target)
+
+            elif action == "move_layer":
+                target = operation.get("target")
+                layer = require_layer(target, "move_layer.target")
+                if target in moved or target in reordered:
+                    raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
+                if layer["is_background"] or layer["all_locked"] or layer["position_locked"]:
+                    raise ValueError("Locked/background layer cannot be moved: " + target)
+                if layer["clipped_to_below"]:
+                    raise ValueError("Clipping-mask layers cannot be moved in organizer v1: " + target)
+                if operation.get("expected_name") != layer["name"]:
+                    raise ValueError("move_layer.expected_name no longer matches " + target)
+                destination = operation.get("destination")
+                if destination == "root":
+                    destination = "root"
+                elif destination in group_parents:
+                    destination = destination
+                else:
+                    destination_layer = require_layer(destination, "move_layer.destination")
+                    if destination_layer["typename"] != "LayerSet":
+                        raise ValueError("move_layer.destination must be root, a LayerSet, or a created group.")
+                if layer["typename"] == "LayerSet" and destination_is_inside_target(
+                    destination, target
+                ):
+                    raise ValueError("Cannot move a LayerSet into itself or one of its descendants.")
+                if operation.get("position", "end") not in ("start", "end"):
+                    raise ValueError("move_layer.position must be 'start' or 'end'.")
+                operation["destination"] = destination
+                operation["position"] = operation.get("position", "end")
+                moved.add(target)
+
+            elif action == "reorder_layer":
+                target = operation.get("target")
+                layer = require_layer(target, "reorder_layer.target")
+                relative = operation.get("relative_to")
+                relative_layer = require_layer(relative, "reorder_layer.relative_to")
+                if target == relative:
+                    raise ValueError("reorder_layer.target and relative_to must differ.")
+                if target in moved or target in reordered:
+                    raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
+                if layer["is_background"] or layer["all_locked"] or layer["position_locked"]:
+                    raise ValueError("Locked/background layer cannot be reordered: " + target)
+                if layer["clipped_to_below"]:
+                    raise ValueError("Clipping-mask layers cannot be reordered in organizer v1: " + target)
+                if operation.get("expected_name") != layer["name"]:
+                    raise ValueError("reorder_layer.expected_name no longer matches " + target)
+                if operation.get("relative_expected_name") != relative_layer["name"]:
+                    raise ValueError("reorder_layer.relative_expected_name no longer matches " + relative)
+                if layer["parent_key"] != relative_layer["parent_key"]:
+                    raise ValueError("reorder_layer references must be siblings.")
+                if operation.get("position") not in ("before", "after"):
+                    raise ValueError("reorder_layer.position must be 'before' or 'after'.")
+                reordered.add(target)
+
+            elif action == "set_visibility":
+                target = operation.get("target")
+                layer = require_layer(target, "set_visibility.target")
+                if target in visibility_set:
+                    raise ValueError("Visibility may be changed only once per layer: " + target)
+                if operation.get("expected_name") != layer["name"]:
+                    raise ValueError("set_visibility.expected_name no longer matches " + target)
+                if not isinstance(operation.get("visible"), bool):
+                    raise ValueError("set_visibility.visible must be a boolean.")
+                visibility_set.add(target)
+
+            else:
+                raise ValueError(
+                    "Unsupported organizer action at index " + str(index) + ": " + str(action)
+                )
+
+        normalized.append(operation)
+
+    # A move target cannot also be the reference layer in a reorder operation:
+    # the relationship would depend on operation order and is therefore rejected.
+    for operation in normalized:
+        if operation["action"] == "reorder_layer":
+            if operation["relative_to"] in moved or operation["relative_to"] in reordered:
+                raise ValueError("reorder_layer relative_to cannot itself be moved/reordered.")
+
+    verify_refs: Dict[str, Dict[str, str]] = {}
+
+    def add_source_ref(key: str) -> None:
+        verify_refs["source:" + key] = {"identity": "source:" + key, "source_key": key}
+
+    def add_group_ref(key: str) -> None:
+        verify_refs["group:" + key] = {"identity": "group:" + key, "group_key": key}
+
+    for key in source_ref_keys:
+        add_source_ref(key)
+    for key in group_parents:
+        add_group_ref(key)
+
+    for operation in normalized:
+        action = operation["action"]
+        if action == "create_group":
+            parent = operation["parent"]
+            if parent in group_parents:
+                add_group_ref(parent)
+            elif parent != "root":
+                add_source_ref(parent)
+        elif action == "move_layer":
+            destination = operation["destination"]
+            if destination in group_parents:
+                add_group_ref(destination)
+            elif destination != "root":
+                add_source_ref(destination)
+        elif action == "reorder_layer":
+            add_source_ref(operation["relative_to"])
+
+    return {
+        "operations": normalized,
+        "verify_refs": list(verify_refs.values()),
+        "created_groups": {
+            operation["key"]: operation
+            for operation in normalized
+            if operation["action"] == "create_group"
+        },
+    }
+
+
+def _build_apply_organize_plan_jsx(config: Dict[str, Any]) -> str:
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(
+                values[i] === undefined || values[i] === null ? "" : String(values[i])
+            ));
+        }
+        return encoded.join("|");
+    }
+    function walk(container, parentKey, map, count) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            var isGroup = layer.typename === "LayerSet";
+            var key = parentKey + "/" + (isGroup ? "G" : "L") + i;
+            map[key] = layer;
+            count.value++;
+            if (isGroup) {
+                walk(layer, key, map, count);
+            }
+        }
+    }
+    function resolveContainer(key, doc, sourceLayers, newGroups) {
+        if (key === "root") {
+            return doc;
+        }
+        if (newGroups[key] !== undefined) {
+            return newGroups[key];
+        }
+        if (sourceLayers[key] !== undefined &&
+            sourceLayers[key].typename === "LayerSet") {
+            return sourceLayers[key];
+        }
+        throw new Error("Destination group could not be resolved: " + key);
+    }
+    function findNodeInfo(target, container, parentKey) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            var isGroup = layer.typename === "LayerSet";
+            var key = parentKey + "/" + (isGroup ? "G" : "L") + i;
+            if (layer === target) {
+                return {
+                    node_key: key,
+                    parent_key: parentKey,
+                    stack_index: i,
+                    typename: layer.typename,
+                    name: layer.name,
+                    visible: layer.visible
+                };
+            }
+            if (isGroup) {
+                var nested = findNodeInfo(target, layer, key);
+                if (nested !== null) {
+                    return nested;
+                }
+            }
+        }
+        return null;
+    }
+
+    var cfg = __SCI_ORGANIZE_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousRulerUnits = app.preferences.rulerUnits;
+    var previousTypeUnits = app.preferences.typeUnits;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var sourceLayers = {};
+    var newGroups = {};
+    var count = {value: 0};
+    var response = "";
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var inputFile = new File(cfg.temp_input_path);
+        if (!inputFile.exists) {
+            throw new Error("Temporary source PSD copy is missing.");
+        }
+        doc = app.open(inputFile);
+        walk(doc, "root", sourceLayers, count);
+
+        // Create all requested groups before resolving moves.
+        for (var i = 0; i < cfg.operations.length; i++) {
+            var create = cfg.operations[i];
+            if (create.action !== "create_group") {
+                continue;
+            }
+            var parent = resolveContainer(create.parent, doc, sourceLayers, newGroups);
+            var group = parent.layerSets.add();
+            group.name = create.name;
+            group.move(parent, ElementPlacement.PLACEATEND);
+            newGroups[create.key] = group;
+        }
+
+        // Rename before moving so labels and paths remain recognizable in reports.
+        for (var r = 0; r < cfg.operations.length; r++) {
+            var rename = cfg.operations[r];
+            if (rename.action === "rename_layer") {
+                sourceLayers[rename.target].name = rename.new_name;
+            }
+        }
+
+        for (var m = 0; m < cfg.operations.length; m++) {
+            var move = cfg.operations[m];
+            if (move.action !== "move_layer") {
+                continue;
+            }
+            var target = sourceLayers[move.target];
+            var destination = resolveContainer(
+                move.destination, doc, sourceLayers, newGroups
+            );
+            target.move(
+                destination,
+                move.position === "start" ?
+                    ElementPlacement.PLACEATBEGINNING :
+                    ElementPlacement.PLACEATEND
+            );
+        }
+
+        for (var o = 0; o < cfg.operations.length; o++) {
+            var reorder = cfg.operations[o];
+            if (reorder.action !== "reorder_layer") {
+                continue;
+            }
+            sourceLayers[reorder.target].move(
+                sourceLayers[reorder.relative_to],
+                reorder.position === "before" ?
+                    ElementPlacement.PLACEBEFORE :
+                    ElementPlacement.PLACEAFTER
+            );
+        }
+
+        for (var v = 0; v < cfg.operations.length; v++) {
+            var visibility = cfg.operations[v];
+            if (visibility.action === "set_visibility") {
+                sourceLayers[visibility.target].visible = visibility.visible;
+            }
+        }
+
+        var outputFile = new File(cfg.staged_output_path);
+        if (outputFile.exists) {
+            throw new Error("Staged organizer output already exists.");
+        }
+        var saveOptions = new PhotoshopSaveOptions();
+        saveOptions.embedColorProfile = true;
+        saveOptions.maximizeCompatibility = true;
+        doc.saveAs(outputFile, saveOptions, true, Extension.LOWERCASE);
+
+        if (!outputFile.exists || outputFile.length <= 0) {
+            throw new Error("Photoshop did not create the staged organizer PSD.");
+        }
+
+        var verificationRows = [];
+        for (var q = 0; q < cfg.verify_refs.length; q++) {
+            var ref = cfg.verify_refs[q];
+            var targetRef = ref.source_key !== undefined ?
+                sourceLayers[ref.source_key] : newGroups[ref.group_key];
+            if (targetRef === undefined) {
+                throw new Error("Could not resolve verification reference: " + ref.identity);
+            }
+            var info = findNodeInfo(targetRef, doc, "root");
+            if (info === null) {
+                throw new Error("Could not locate a modified layer after organization: " + ref.identity);
+            }
+            verificationRows.push(encodeRecord([
+                "VERIFY",
+                ref.identity,
+                info.node_key,
+                info.parent_key,
+                info.stack_index,
+                info.typename,
+                info.name,
+                info.visible
+            ]));
+        }
+
+        response = [
+            "SCI_PS_ORGANIZE_PSD",
+            "OK",
+            outputFile.fsName,
+            String(cfg.operations.length),
+            String(count.value),
+            verificationRows.join("\n")
+        ].join("\t");
+
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+        doc = null;
+    } catch (e) {
+        response = [
+            "SCI_PS_ORGANIZE_PSD",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreDocError) {}
+        }
+        try {
+            app.preferences.rulerUnits = previousRulerUnits;
+        } catch (restoreRulerError) {}
+        try {
+            app.preferences.typeUnits = previousTypeUnits;
+        } catch (restoreTypeError) {}
+        app.displayDialogs = previousDialogs;
+    }
+    return response;
+})();
+"""
+    return template.replace("__SCI_ORGANIZE_CONFIG__", payload)
+
+
+def _parse_organize_verify_records(encoded_records: str) -> Dict[str, Dict[str, Any]]:
+    verified: Dict[str, Dict[str, Any]] = {}
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if len(values) != 8 or values[0] != "VERIFY":
+            raise ValueError("Invalid organizer verification record: " + repr(values))
+        identity = values[1]
+        if identity in verified:
+            raise ValueError("Duplicate organizer verification identity: " + identity)
+        verified[identity] = {
+            "node_key": values[2],
+            "parent_key": values[3],
+            "stack_index": int(values[4]),
+            "typename": values[5],
+            "name": values[6],
+            "visible": values[7].lower() == "true",
+        }
+    return verified
+
+
+def apply_organize_plan(
+    input_path: str | Path,
+    plan: Dict[str, Any] | str | Path,
+    output_path: str | Path,
+    *,
+    approved: bool = False,
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Apply an explicitly approved, structure-only plan to a temporary copy of a PSD."""
+    if not approved:
+        raise PermissionError(
+            "Organizer plan has not been approved. Review it with the user and pass approved=True."
+        )
+
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".psd":
+        raise ValueError("output_path must end in .psd.")
+    if str(source_file).casefold() == str(output_file).casefold():
+        raise ValueError("output_path must differ from input_path; the source PSD is never modified.")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if output_file.exists() and not overwrite:
+        raise FileExistsError(
+            "Output PSD already exists; pass overwrite=True to replace it: "
+            + str(output_file)
+        )
+
+    loaded_plan = _load_organize_plan(plan)
+    source_hash_before = _sha256_file(source_file)
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+
+    # Inspect immediately before application to reject stale or mismatched plans.
+    before = inspect_psd(source_file, bridge=active_bridge)
+    normalized = _validate_organize_plan(loaded_plan, before)
+
+    token = uuid.uuid4().hex[:16]
+    temp_input = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / (
+        "sci_org_" + token + ".psd"
+    )
+    staged_output = output_file.parent / (".sci_org_" + token + ".psd")
+    try:
+        shutil.copy2(source_file, temp_input)
+        if _sha256_file(temp_input) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Temporary working copy is not byte-identical to the source PSD.",
+                exception_type="WorkingCopyIntegrityError",
+            )
+
+        config = {
+            "temp_input_path": str(temp_input),
+            "staged_output_path": str(staged_output),
+            "operations": normalized["operations"],
+            "verify_refs": normalized["verify_refs"],
+        }
+        jsx = _build_apply_organize_plan_jsx(config)
+        raw = active_bridge.execute_jsx(jsx)
+        protocol = _parse_protocol(raw, "SCI_PS_ORGANIZE_PSD", 6, "apply_organize_plan", jsx)
+
+        if not staged_output.is_file() or staged_output.stat().st_size <= 0:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Photoshop reported success but the staged PSD is missing or empty.",
+                exception_type="PsdSaveVerificationError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        verified_refs = _parse_organize_verify_records(protocol[5])
+        expected_identities = {
+            item["identity"] for item in normalized["verify_refs"]
+        }
+        if set(verified_refs) != expected_identities:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Photoshop verification references do not match the approved plan.",
+                exception_type="OrganizerVerificationMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        after = inspect_psd(staged_output, bridge=active_bridge)
+        after_by_key = {layer["node_key"]: layer for layer in after["layers"]}
+
+        for identity, observed in verified_refs.items():
+            reopened = after_by_key.get(observed["node_key"])
+            if reopened is None:
+                raise PhotoshopBridgeError(
+                    "apply_organize_plan",
+                    "Reopened PSD is missing an expected organized layer: " + identity,
+                    exception_type="OrganizerReopenVerificationError",
+                )
+            if (
+                reopened["parent_key"] != observed["parent_key"]
+                or reopened["stack_index"] != observed["stack_index"]
+                or reopened["typename"] != observed["typename"]
+                or reopened["name"] != observed["name"]
+                or reopened["visible"] != observed["visible"]
+            ):
+                raise PhotoshopBridgeError(
+                    "apply_organize_plan",
+                    "Reopened PSD layer state differs from Photoshop's organization result: "
+                    + identity,
+                    exception_type="OrganizerReopenVerificationError",
+                )
+
+        for operation in normalized["operations"]:
+            action = operation["action"]
+            if action == "create_group":
+                observed = verified_refs["group:" + operation["key"]]
+                if observed["typename"] != "LayerSet" or observed["name"] != operation["name"]:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Created group failed verification: " + operation["key"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+                parent_identity = (
+                    "group:" + operation["parent"]
+                    if operation["parent"] in normalized["created_groups"]
+                    else "source:" + operation["parent"]
+                    if operation["parent"] != "root"
+                    else None
+                )
+                expected_parent = (
+                    verified_refs[parent_identity]["node_key"]
+                    if parent_identity is not None else "root"
+                )
+                if observed["parent_key"] != expected_parent:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Created group was placed under the wrong parent: " + operation["key"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "rename_layer":
+                observed = verified_refs["source:" + operation["target"]]
+                if observed["name"] != operation["new_name"]:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Renamed layer failed verification: " + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "move_layer":
+                observed = verified_refs["source:" + operation["target"]]
+                destination = operation["destination"]
+                if destination == "root":
+                    expected_parent = "root"
+                elif destination in normalized["created_groups"]:
+                    expected_parent = verified_refs["group:" + destination]["node_key"]
+                else:
+                    expected_parent = verified_refs["source:" + destination]["node_key"]
+                if observed["parent_key"] != expected_parent:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Moved layer has an unexpected parent: " + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "reorder_layer":
+                observed = verified_refs["source:" + operation["target"]]
+                relative = verified_refs["source:" + operation["relative_to"]]
+                correct = (
+                    observed["parent_key"] == relative["parent_key"]
+                    and (
+                        observed["stack_index"] < relative["stack_index"]
+                        if operation["position"] == "before"
+                        else observed["stack_index"] > relative["stack_index"]
+                    )
+                )
+                if not correct:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Reordered layer is not on the requested side of its reference: "
+                        + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "set_visibility":
+                observed = verified_refs["source:" + operation["target"]]
+                if observed["visible"] is not operation["visible"]:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Layer visibility failed verification: " + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+        if _sha256_file(source_file) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "The source PSD SHA-256 changed during organization.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        staged_hash = _sha256_file(staged_output)
+        if output_file.exists() and not overwrite:
+            raise FileExistsError(
+                "Output PSD appeared during processing; refusing to overwrite: "
+                + str(output_file)
+            )
+        os.replace(staged_output, output_file)
+        if _sha256_file(output_file) != staged_hash:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Final PSD differs from its verified staging file.",
+                exception_type="OutputIntegrityError",
+            )
+
+        return {
+            "passed": True,
+            "input_psd": str(source_file),
+            "output_psd": str(output_file),
+            "source_sha256_unchanged": True,
+            "source_layer_tree_sha256": before["layer_tree_sha256"],
+            "output_layer_tree_sha256": after["layer_tree_sha256"],
+            "operation_count": len(normalized["operations"]),
+            "layer_count_before": before["layer_count"],
+            "layer_count_after": after["layer_count"],
+            "group_count_after": after["group_count"],
+            "text_layer_count_after": after["text_layer_count"],
+            "smart_object_count_after": after["smart_object_count"],
+            "operations": normalized["operations"],
+            "verified_references": verified_refs,
+        }
+    finally:
+        for temporary in (temp_input, staged_output):
+            try:
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
+
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
