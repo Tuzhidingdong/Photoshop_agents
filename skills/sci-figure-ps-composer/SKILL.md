@@ -23,7 +23,7 @@ The implementation is staged. The Photoshop Bridge has passed a real-machine dia
 Install the dependency into the exact Python interpreter that will run the skill:
 
 ~~~powershell
-python -m pip install "photoshop-python-api>=0.24.2,<0.25"
+python -m pip install -r requirements.txt
 ~~~
 
 Do not assume the python command resolves to the intended environment. Prefer the interpreter explicitly selected by the user or the active environment's python.exe.
@@ -97,16 +97,42 @@ The unit lock intentionally changes Photoshop's global preferences and leaves th
 - Preserve editable layers in PSD output. Flatten only export copies when producing TIFF or PNG.
 - Report what was changed and where files were written.
 
-## Planned feature milestones
+## compose_grid: current implementation
 
-These are design targets, not implemented capabilities yet:
+The Python API is:
 
-1. compose_grid: physical-size canvas presets, pixel geometry, optional conservative edge trimming, proportional panel fitting, smart objects, and per-panel groups.
-2. add_panel_labels: lowercase, uppercase, and parenthesized labels with editable text layers.
-3. add_scale_bar: explicit-pixel and physically calibrated scale bars, with editable bar and label layers.
-4. unify_fonts: recursive text-layer traversal and selective font/size/color normalization.
-5. export_figure: editable PSD plus RGB LZW TIFF and high-resolution PNG.
-6. preflight_figure: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
+~~~python
+from ps_sci_toolkit import compose_grid
+
+result = compose_grid(
+    ["panel-a.tif", "panel-b.tif", "panel-c.tif", "panel-d.tif"],
+    "Figure_1.psd",
+    preset="double",
+    rows=2,
+    cols=2,
+    dpi=300,
+    margin_cm=0.3,
+    gap_cm=0.2,
+    align="center",
+    auto_trim=True,
+)
+~~~
+
+Supported width presets are `single` (8.5 cm), `half_double` (12.0 cm), and `double` (17.6 cm), plus `custom` with an explicit `width_cm`. DPI is 300 or 600. If `height_cm` is omitted, the toolkit derives the canvas height from the median source-image aspect ratio. Image count must equal `rows × cols`; inputs are assigned in row-major order.
+
+The script calculates layout in pixels, creates a white RGB Photoshop document, places every source through Photoshop's native Place command as an embedded Smart Object, and moves each object into its own `Group_Panel_a`, `Group_Panel_b`, etc. Images are scaled proportionally to fit their cells; they are never stretched. `align` accepts `center` or `top-left`.
+
+When `auto_trim=True`, the code edits the embedded Smart Object contents, not the original source file. It samples the top-left pixel; if the sampled color is near-white, it uses Photoshop `Document.trim(TrimType.TOPLEFT)`, then calls `Document.trim(TrimType.TRANSPARENT)`. Color-based trim uses the exact corner pixel as its trim color; this is not a tolerance-based near-white flood-fill. Inspect results when white scientific signal touches the edge.
+
+The output path must end in `.psd`. Existing files are protected unless `overwrite=True` is explicitly requested. After Photoshop reports success, Python checks the calculated canvas dimensions and verifies that the PSD exists and is non-empty. This save check does not replace reopening the PSD in Photoshop and inspecting its Smart Objects.
+
+## Remaining feature milestones
+
+1. `add_panel_labels`: lowercase, uppercase, and parenthesized labels with editable text layers.
+2. `add_scale_bar`: explicit-pixel and physically calibrated scale bars, with editable bar and label layers.
+3. `unify_fonts`: recursive text-layer traversal and selective font/size/color normalization.
+4. `export_figure`: editable PSD plus RGB LZW TIFF and high-resolution PNG.
+5. `preflight_figure`: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
 
 Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
 
@@ -114,7 +140,7 @@ Implement and test each feature separately. Keep the Python public API stable wh
 
 Every bridge failure must identify:
 
-- operation (connect, status, lock_units, or execute_jsx);
+- operation (connect, status, lock_units, execute_jsx, or compose_grid);
 - Python exception class, if any;
 - original exception message;
 - JSX preview when applicable;
