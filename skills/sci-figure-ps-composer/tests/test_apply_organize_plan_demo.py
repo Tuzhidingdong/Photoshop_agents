@@ -52,7 +52,13 @@ def main() -> int:
         raise RuntimeError(
             "No movable, unlocked, non-background, non-clipping ArtLayer was found."
         )
-    target = candidates[-1]
+    # Prefer an embedded Smart Object so the integration test verifies that
+    # reparenting preserves the image as an editable Smart Object.
+    smart_objects = [
+        layer for layer in candidates
+        if layer["kind"] == "LayerKind.SMARTOBJECT"
+    ]
+    target = (smart_objects or candidates)[-1]
 
     plan = {
         "schema_version": 1,
@@ -112,6 +118,7 @@ def main() -> int:
             "output_psd": str(output),
             "moved_layer": target["path"],
             "moved_layer_name": target["name"],
+            "moved_layer_kind": target["kind"],
             "new_group": group["name"],
             "source_sha256_unchanged": True,
             "layer_count_before": result["layer_count_before"],
