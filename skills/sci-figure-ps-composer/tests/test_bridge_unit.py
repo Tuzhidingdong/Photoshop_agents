@@ -222,8 +222,7 @@ class ComposeGridUnitTests(unittest.TestCase):
             gap_cm=0.2,
         )
         bridge = FakeComposeBridge(
-            "SCI_PS_COMPOSE\\tOK\\tDemo\\t2079\\t2079\\t300\\t4\\t0\\t"
-            .replace("\\\\t", "\\t")
+            "SCI_PS_COMPOSE\tOK\tDemo\t2079\t2079\t300\t4\t0\t"
         )
 
         original_sizes = [path.stat().st_size for path in self.images]
