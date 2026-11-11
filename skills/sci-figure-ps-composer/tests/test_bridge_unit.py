@@ -4,6 +4,9 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 from pathlib import Path
 
 from PIL import Image
@@ -14,6 +17,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from ps_sci_toolkit import (
     PhotoshopBridge,
     PhotoshopBridgeError,
+    main,
     calculate_grid_layout,
     cm_to_pixels,
     compose_grid,
@@ -1787,6 +1791,28 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires reviewed visual_preview evidence"):
             finalize_psd_classification_template(template_path, output)
         self.assertFalse(output.exists())
+
+    def test_classification_finalization_cli_does_not_initialize_photoshop_com(self):
+        template_path, _ = self._make_reviewed_template_with_full_previews()
+        output = self.root / "cli_final_classification.json"
+        captured = StringIO()
+
+        with patch(
+            "ps_sci_toolkit.PhotoshopBridge",
+            side_effect=AssertionError("Pure classification finalization must not connect to Photoshop."),
+        ):
+            with redirect_stdout(captured):
+                exit_code = main([
+                    "--action", "finalize-psd-classification-template",
+                    "--classification-template", str(template_path),
+                    "--output", str(output),
+                    "--execution-mode", "quiet",
+                    "--json",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(output.is_file())
+        self.assertTrue(json.loads(captured.getvalue())["passed"])
 
     def test_finalize_requires_complete_preview_coverage_and_preserves_template(self):
         template_path, template = self._make_reviewed_template_with_full_previews()
