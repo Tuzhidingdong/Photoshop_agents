@@ -128,9 +128,9 @@ The Stage 6 test creates a new export folder containing a byte-identical editabl
 After Stage 6 passes, run the Stage 7 read-only publication preflight on the Stage 5 editable PSD and its Stage 6 export bundle:
 
 ~~~powershell
-python tests/test_preflight_figure_demo.py \
-  --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd \
-  --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports \
+python tests/test_preflight_figure_demo.py `
+  --input-psd path\to\Figure_Grid_Stage5_FontsUnified.psd `
+  --export-dir path\to\Figure_Grid_Stage5_FontsUnified_exports `
   --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 ~~~
 
