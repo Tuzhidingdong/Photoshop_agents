@@ -119,7 +119,15 @@ def _parse_protocol(
 class PhotoshopBridge:
     """Thin, synchronous bridge to a running desktop Photoshop instance."""
 
-    def __init__(self, app: Any = None) -> None:
+    def __init__(
+        self,
+        app: Any = None,
+        *,
+        execution_mode: str = "quiet",
+    ) -> None:
+        if execution_mode not in ("quiet", "interactive"):
+            raise ValueError("execution_mode must be 'quiet' or 'interactive'.")
+        self.execution_mode = execution_mode
         self.app = app if app is not None else self._connect_application()
 
     @staticmethod
@@ -161,14 +169,18 @@ class PhotoshopBridge:
                 exception_type="InvalidJSXInput",
             )
 
+        execution_jsx = jsx
+        if self.execution_mode == "interactive":
+            execution_jsx = jsx.replace("DialogModes.NO", "DialogModes.ALL")
+
         try:
-            result = self.app.doJavaScript(jsx)
+            result = self.app.doJavaScript(execution_jsx)
         except Exception as exc:
             raise PhotoshopBridgeError(
                 "execute_jsx",
                 "Photoshop rejected or failed to execute JSX. Original error: " + str(exc),
                 exception_type=type(exc).__name__,
-                jsx_preview=_clean_jsx_preview(jsx),
+                jsx_preview=_clean_jsx_preview(execution_jsx),
             ) from exc
 
         if result is None:
@@ -3763,6 +3775,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bridge operation. Default: diagnose.",
     )
     parser.add_argument(
+        "--execution-mode",
+        choices=("quiet", "interactive"),
+        default="quiet",
+        help=(
+            "quiet suppresses Photoshop dialogs but still requires desktop Photoshop; "
+            "interactive permits Photoshop dialogs. Default: quiet."
+        ),
+    )
+    parser.add_argument(
         "--jsx-file",
         type=Path,
         help="JSX file to execute when --action exec-jsx is selected.",
@@ -3945,7 +3966,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
     try:
-        bridge = PhotoshopBridge()
+        bridge = PhotoshopBridge(execution_mode=args.execution_mode)
 
         if args.action == "diagnose":
             result = bridge.diagnose()
