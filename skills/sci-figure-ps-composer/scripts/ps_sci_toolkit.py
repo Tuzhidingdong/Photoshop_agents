@@ -3736,6 +3736,373 @@ def preflight_figure(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 8A: inspect an existing PSD without modifying it
+# ---------------------------------------------------------------------------
+
+
+def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
+    """Build read-only JSX that enumerates the mixed, ordered Photoshop layer tree."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(
+                values[i] === undefined || values[i] === null ? "" : String(values[i])
+            ));
+        }
+        return encoded.join("|");
+    }
+    function safeProperty(object, propertyName, fallback) {
+        try {
+            var value = object[propertyName];
+            return value === undefined || value === null ? fallback : value;
+        } catch (e) {
+            return fallback;
+        }
+    }
+    function px(value) {
+        try {
+            return value.as("px");
+        } catch (e) {
+            return "";
+        }
+    }
+    function layerBounds(layer) {
+        try {
+            var b = layer.bounds;
+            return [px(b[0]), px(b[1]), px(b[2]), px(b[3])];
+        } catch (e) {
+            return ["", "", "", ""];
+        }
+    }
+    function rgbHex(color) {
+        function hex(value) {
+            var result = Math.round(value).toString(16).toUpperCase();
+            return result.length < 2 ? "0" + result : result;
+        }
+        try {
+            return "#" + hex(color.rgb.red) + hex(color.rgb.green) + hex(color.rgb.blue);
+        } catch (e) {
+            return "";
+        }
+    }
+    function inspectText(layer) {
+        if (String(safeProperty(layer, "kind", "")) !== String(LayerKind.TEXT)) {
+            return ["", "", "", ""];
+        }
+        try {
+            var item = layer.textItem;
+            return [
+                String(item.contents),
+                String(item.font),
+                item.size.as("pt"),
+                rgbHex(item.color)
+            ];
+        } catch (e) {
+            return ["", "", "", ""];
+        }
+    }
+
+    var cfg = __SCI_INSPECT_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousRulerUnits = app.preferences.rulerUnits;
+    var previousTypeUnits = app.preferences.typeUnits;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var rows = [];
+    var layerCount = 0;
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var inputFile = new File(cfg.input_path);
+        if (!inputFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+        doc = app.open(inputFile);
+
+        var width = doc.width.as("px");
+        var height = doc.height.as("px");
+        var dpi = Number(doc.resolution);
+        var mode = doc.mode == DocumentMode.RGB ? "RGB" : String(doc.mode);
+        var profile = "";
+        try {
+            profile = String(doc.colorProfileName);
+        } catch (profileError) {}
+        rows.push(encodeRecord([
+            "DOC", doc.name, width, height, dpi, mode, profile
+        ]));
+
+        function walk(container, parentKey, parentPath, depth) {
+            // Document.layers / LayerSet.layers preserves the interleaved
+            // front-to-back order of ArtLayers and LayerSets.
+            var collection = container.layers;
+            for (var i = 0; i < collection.length; i++) {
+                var layer = collection[i];
+                var isGroup = layer.typename === "LayerSet";
+                var nodeKey = parentKey + "/" + (isGroup ? "G" : "L") + i;
+                var layerPath = parentPath + "/" + layer.name;
+                var bounds = layerBounds(layer);
+                var text = isGroup ? ["", "", "", ""] : inspectText(layer);
+                var kind = isGroup ? "LayerSet" : String(safeProperty(layer, "kind", "unknown"));
+
+                rows.push(encodeRecord([
+                    "LAYER",
+                    nodeKey,
+                    parentKey,
+                    i,
+                    depth,
+                    layer.typename,
+                    layer.name,
+                    kind,
+                    safeProperty(layer, "visible", true),
+                    safeProperty(layer, "opacity", 100),
+                    safeProperty(layer, "blendMode", ""),
+                    safeProperty(layer, "isBackgroundLayer", false),
+                    safeProperty(layer, "allLocked", false),
+                    safeProperty(layer, "positionLocked", false),
+                    safeProperty(layer, "pixelsLocked", false),
+                    safeProperty(layer, "grouped", false),
+                    bounds[0], bounds[1], bounds[2], bounds[3],
+                    text[0], text[1], text[2], text[3],
+                    layerPath
+                ]));
+                layerCount++;
+
+                if (isGroup) {
+                    walk(layer, nodeKey, layerPath, depth + 1);
+                }
+            }
+        }
+
+        walk(doc, "root", doc.name, 0);
+        rows.unshift(encodeRecord(["COUNT", layerCount]));
+
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+        doc = null;
+        return ["SCI_PS_INSPECT_PSD", "OK", rows.join("\n")].join("\t");
+    } catch (e) {
+        return [
+            "SCI_PS_INSPECT_PSD",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreDocError) {}
+        }
+        try {
+            app.preferences.rulerUnits = previousRulerUnits;
+        } catch (restoreRulerError) {}
+        try {
+            app.preferences.typeUnits = previousTypeUnits;
+        } catch (restoreTypeError) {}
+        app.displayDialogs = previousDialogs;
+    }
+})();
+"""
+    return template.replace("__SCI_INSPECT_CONFIG__", payload)
+
+
+def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
+    """Decode a read-only PSD inspection payload into an ordered layer tree."""
+    parsed: Dict[str, Any] = {
+        "document": None,
+        "layers": [],
+        "layer_count": 0,
+    }
+
+    def number(value: str, default: Optional[float] = None) -> Optional[float]:
+        if value == "":
+            return default
+        return float(value)
+
+    def boolean(value: str) -> bool:
+        return str(value).lower() == "true"
+
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if values[0] == "COUNT":
+            if len(values) != 2:
+                raise ValueError("Invalid COUNT inspection record: " + repr(values))
+            parsed["layer_count"] = int(values[1])
+        elif values[0] == "DOC":
+            if len(values) != 7:
+                raise ValueError("Invalid DOC inspection record: " + repr(values))
+            parsed["document"] = {
+                "name": values[1],
+                "width_px": int(float(values[2])),
+                "height_px": int(float(values[3])),
+                "dpi": float(values[4]),
+                "mode": values[5],
+                "color_profile": values[6],
+            }
+        elif values[0] == "LAYER":
+            if len(values) != 26:
+                raise ValueError(
+                    "Invalid LAYER inspection record; expected 26 fields, got "
+                    + str(len(values))
+                )
+            parsed["layers"].append({
+                "node_key": values[1],
+                "parent_key": values[2],
+                "stack_index": int(values[3]),
+                "depth": int(values[4]),
+                "typename": values[5],
+                "name": values[6],
+                "kind": values[7],
+                "visible": boolean(values[8]),
+                "opacity": float(values[9]),
+                "blend_mode": values[10],
+                "is_background": boolean(values[11]),
+                "all_locked": boolean(values[12]),
+                "position_locked": boolean(values[13]),
+                "pixels_locked": boolean(values[14]),
+                "clipped_to_below": boolean(values[15]),
+                "bounds_px": [
+                    number(values[16]), number(values[17]),
+                    number(values[18]), number(values[19]),
+                ],
+                "text": {
+                    "contents": values[20],
+                    "font_postscript": values[21],
+                    "size_pt": number(values[22]),
+                    "color_hex": values[23],
+                } if values[7] == "LayerKind.TEXT" else None,
+                "path": values[24],
+            })
+        else:
+            raise ValueError("Unknown PSD inspection record type: " + values[0])
+
+    if parsed["document"] is None:
+        raise ValueError("Photoshop PSD inspection did not contain a DOC record.")
+    if parsed["layer_count"] != len(parsed["layers"]):
+        raise ValueError(
+            "PSD inspection layer count mismatch: "
+            + str(parsed["layer_count"]) + " vs " + str(len(parsed["layers"]))
+        )
+
+    keys = [layer["node_key"] for layer in parsed["layers"]]
+    if len(keys) != len(set(keys)):
+        raise ValueError("PSD inspection returned duplicate node keys.")
+    known_keys = {"root", *keys}
+    for layer in parsed["layers"]:
+        if layer["parent_key"] not in known_keys:
+            raise ValueError(
+                "PSD inspection returned an unknown parent key for "
+                + layer["node_key"]
+            )
+    return parsed
+
+
+def inspect_psd(
+    input_path: str | Path,
+    *,
+    report_path: Optional[str | Path] = None,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Inspect an existing PSD read-only and return its full ordered layer tree."""
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+
+    report_file: Optional[Path] = None
+    if report_path is not None:
+        report_file = Path(report_path).expanduser().resolve()
+        if report_file.suffix.lower() != ".json":
+            raise ValueError("report_path must end in .json.")
+        if report_file.exists():
+            raise FileExistsError(
+                "Inspection report already exists; choose another path: "
+                + str(report_file)
+            )
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+
+    source_hash_before = _sha256_file(source_file)
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    jsx = _build_inspect_psd_jsx({"input_path": str(source_file)})
+    raw = active_bridge.execute_jsx(jsx)
+    protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
+    inspected = _parse_psd_inspection_records(protocol[2])
+
+    source_hash_after = _sha256_file(source_file)
+    if source_hash_after != source_hash_before:
+        raise PhotoshopBridgeError(
+            "inspect_psd",
+            "The source PSD SHA-256 changed during read-only inspection.",
+            exception_type="SourceIntegrityError",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    fingerprint_payload = [
+        {
+            "node_key": layer["node_key"],
+            "parent_key": layer["parent_key"],
+            "typename": layer["typename"],
+            "name": layer["name"],
+            "kind": layer["kind"],
+            "stack_index": layer["stack_index"],
+            "bounds_px": layer["bounds_px"],
+            "visible": layer["visible"],
+        }
+        for layer in inspected["layers"]
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    report = {
+        "schema_version": 1,
+        "passed": True,
+        "input_psd": str(source_file),
+        "source_sha256": source_hash_before,
+        "layer_tree_sha256": fingerprint,
+        "document": inspected["document"],
+        "layer_count": inspected["layer_count"],
+        "group_count": sum(1 for layer in inspected["layers"] if layer["typename"] == "LayerSet"),
+        "text_layer_count": sum(1 for layer in inspected["layers"] if layer["kind"] == "LayerKind.TEXT"),
+        "smart_object_count": sum(1 for layer in inspected["layers"] if layer["kind"] == "LayerKind.SMARTOBJECT"),
+        "layers": inspected["layers"],
+        "source_sha256_unchanged": True,
+    }
+
+    if report_file is not None:
+        temp_report = report_file.with_name(report_file.stem + ".tmp" + report_file.suffix)
+        try:
+            temp_report.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temp_report, report_file)
+        finally:
+            if temp_report.exists():
+                temp_report.unlink()
+        report["report_path"] = str(report_file)
+
+    return report
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
@@ -3770,7 +4137,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -3817,6 +4184,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-psd",
         type=Path,
         help="Input PSD for --action add-panel-labels; source is never modified.",
+    )
+    parser.add_argument(
+        "--inspection-report",
+        type=Path,
+        help="Optional JSON output path for --action inspect-psd.",
     )
     parser.add_argument(
         "--label-style",
@@ -3942,6 +4314,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "inspect-psd":
+        if args.input_psd is None:
+            print(
+                "ERROR: --input-psd is required for --action inspect-psd.",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.action == "preflight-figure":
         if args.input_psd is None:
             print(
@@ -4017,6 +4397,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 size_pt=args.unify_font_size_pt,
                 color_hex=args.unify_font_color,
                 overwrite=args.overwrite,
+                bridge=bridge,
+            )
+        elif args.action == "inspect-psd":
+            result = inspect_psd(
+                args.input_psd,
+                report_path=args.inspection_report,
                 bridge=bridge,
             )
         elif args.action == "preflight-figure":
