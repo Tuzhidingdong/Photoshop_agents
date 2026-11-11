@@ -1,0 +1,137 @@
+---
+name: sci-figure-ps-composer
+description: Automate publication-ready scientific multi-panel figure composition in desktop Adobe Photoshop on Windows, using Python COM automation and native ExtendScript/JSX while preserving editable PSD layers.
+---
+
+# sci-figure-ps-composer
+
+## Purpose
+
+Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
+
+The implementation is staged. The current repository milestone implements the Photoshop Bridge only: COM connection, JSX execution, unit locking, status inspection, and structured diagnostics. Do not claim that grid composition, panel labels, scale bars, font unification, or publication export are implemented until their functions and real-Photoshop tests have been added.
+
+## Runtime requirements
+
+- Windows desktop session.
+- Adobe Photoshop installed. The Photoshop process should be started before running the bridge.
+- Python 3.9 or later; the validated user environment is Python 3.13.9.
+- photoshop-python-api 0.24.2 or a compatible 0.24.x release.
+- COM support through the package's comtypes dependency.
+
+Install the dependency into the exact Python interpreter that will run the skill:
+
+~~~powershell
+python -m pip install "photoshop-python-api>=0.24.2,<0.25"
+~~~
+
+Do not assume the python command resolves to the intended environment. Prefer the interpreter explicitly selected by the user or the active environment's python.exe.
+
+## Current implemented interface
+
+The toolkit is located at scripts/ps_sci_toolkit.py.
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action diagnose
+python scripts/ps_sci_toolkit.py --action status
+python scripts/ps_sci_toolkit.py --action lock-units
+python scripts/ps_sci_toolkit.py --action exec-jsx --jsx-file path\to\script.jsx
+~~~
+
+The default action is diagnose.
+
+### Bridge behavior
+
+1. Import photoshop.api and create photoshop.api.Application().
+2. Execute JSX through the package's Application.doJavaScript() method.
+3. Normalize Python/COM/JSX failures as PhotoshopBridgeError, preserving the operation stage, exception type, message, and a short JSX preview.
+4. Lock app.preferences.rulerUnits to Units.PIXELS.
+5. Lock app.preferences.typeUnits to TypeUnits.POINTS.
+6. Verify both preferences by reading them back from Photoshop.
+
+The unit lock intentionally changes Photoshop's global preferences and leaves them set to Pixels and Points. It does not create, close, or modify a document.
+
+## Agent workflow
+
+### Before any document operation
+
+- Confirm the user is on Windows and identify the exact Python interpreter.
+- Confirm Photoshop is running. Do not launch or terminate Photoshop automatically.
+- Run --action diagnose and inspect its structured result.
+- If COM connection fails, stop before attempting document changes. Report the stage and original error.
+- If JSX execution works but unit verification fails, stop and report the observed values; do not silently proceed with geometry calculations.
+- Never claim real Photoshop integration passed based only on mocked tests.
+
+### JSX authoring requirements
+
+- Use Photoshop-native DOM/ExtendScript operations for document, layer, text, smart-object, and export work.
+- Keep JSX payloads self-contained and return a machine-readable result. The current bridge uses tab-delimited protocol markers to avoid dependence on newer JavaScript features in ExtendScript.
+- Catch errors inside JSX when a controlled result is required; include the error name, message, and line when available.
+- Allow Python to catch COM exceptions from doJavaScript() and wrap them in PhotoshopBridgeError.
+- Do not use browser APIs, Node APIs, or modern JavaScript syntax unsupported by ExtendScript.
+- Escape all user-provided strings before embedding them in JSX. Never concatenate untrusted file paths or labels without encoding.
+
+### Document safety
+
+- Do not close, overwrite, flatten, or save a user's active document unless the requested task explicitly requires it.
+- Inspect app.documents.length before document-dependent operations.
+- Use explicit output paths and avoid overwriting existing files by default.
+- Keep original input images unchanged. Preprocessing must write to a separate working location.
+- Preserve editable layers in PSD output. Flatten only export copies when producing TIFF or PNG.
+- Report what was changed and where files were written.
+
+## Planned feature milestones
+
+These are design targets, not implemented capabilities yet:
+
+1. compose_grid: physical-size canvas presets, pixel geometry, optional conservative edge trimming, proportional panel fitting, smart objects, and per-panel groups.
+2. add_panel_labels: lowercase, uppercase, and parenthesized labels with editable text layers.
+3. add_scale_bar: explicit-pixel and physically calibrated scale bars, with editable bar and label layers.
+4. unify_fonts: recursive text-layer traversal and selective font/size/color normalization.
+5. export_figure: editable PSD plus RGB LZW TIFF and high-resolution PNG.
+6. preflight_figure: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
+
+Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
+
+## Error handling
+
+Every bridge failure must identify:
+
+- operation (connect, status, lock_units, or execute_jsx);
+- Python exception class, if any;
+- original exception message;
+- JSX preview when applicable;
+- whether Photoshop was detected and connected.
+
+A failure must not be converted into a success-shaped return value. CLI exit code 0 means the selected operation passed; non-zero means it failed or prerequisites were missing.
+
+## Validation
+
+Run platform-independent unit tests:
+
+~~~powershell
+python -m unittest discover -s tests -v
+~~~
+
+Then run the real Photoshop integration check on the Windows machine:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action diagnose
+~~~
+
+A real integration pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Unit tests alone are not proof of Photoshop compatibility.
+
+## Confirmed environment baseline
+
+The initial real-machine test for this skill reported:
+
+- Python 3.13.9 at D:\Software\Anacoda\python.exe.
+- photoshop-python-api 0.24.2.
+- Photoshop 2026, version 27.9.1 (file version 27.9).
+- Photoshop.Application COM registration and connection succeeded.
+- Application.doJavaScript() succeeded.
+- Ruler units verified as Units.PIXELS.
+- Type units verified as TypeUnits.POINTS.
+- A deliberately raised and caught ExtendScript exception returned its marker correctly.
+
+This baseline is specific to the tested Windows machine. Re-run diagnostics after changing Photoshop, Python, or the package version.
