@@ -33,6 +33,7 @@ from ps_sci_toolkit import (
     _build_apply_organize_plan_jsx,
     _build_preview_psd_layers_jsx,
     validate_psd_classification,
+    create_psd_classification_template,
     create_organize_plan_draft,
     _parse_psd_preview_records,
     preview_psd_layers,
@@ -1377,7 +1378,14 @@ class PreviewPsdLayersTests(unittest.TestCase):
 def _make_valid_classification(inspection, use_visual_evidence=False):
     classifications = []
     for layer in inspection["layers"]:
-        if layer["typename"] == "LayerSet":
+        if layer.get("is_background") is True:
+            role = "background"
+            evidence = [{
+                "type": "layer_metadata",
+                "observation": "Photoshop marks this node as the document Background layer.",
+                "fields": {"is_background": True},
+            }]
+        elif layer["typename"] == "LayerSet":
             role = "panel_group" if layer["name"].startswith("Group_Panel_") else "unknown"
             evidence = [{
                 "type": "layer_name",
@@ -1447,6 +1455,95 @@ class PsdSemanticClassificationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_native_background_must_use_background_role_and_matching_metadata(self):
+        result = validate_psd_classification(
+            self.input_psd,
+            self.inspection_path,
+            self.classification,
+        )
+        self.assertEqual(result["role_counts"]["background"], 1)
+
+        wrong_role = json.loads(json.dumps(self.classification))
+        background = next(
+            item for item in wrong_role["classifications"]
+            if item["node_key"] == "root/L3"
+        )
+        background["role"] = "unknown"
+        background["confidence"] = 0.35
+        background["evidence"] = [{
+            "type": "layer_type",
+            "observation": "LayerKind.NORMAL",
+        }]
+        with self.assertRaisesRegex(ValueError, "must use role='background'"):
+            validate_psd_classification(
+                self.input_psd, self.inspection_path, wrong_role
+            )
+
+        wrong_flag = json.loads(json.dumps(self.classification))
+        background = next(
+            item for item in wrong_flag["classifications"]
+            if item["node_key"] == "root/L3"
+        )
+        background["evidence"][0]["fields"]["is_background"] = False
+        with self.assertRaisesRegex(ValueError, "does not match inspected value"):
+            validate_psd_classification(
+                self.input_psd, self.inspection_path, wrong_flag
+            )
+
+    def test_create_psd_classification_template_covers_all_nodes_without_guessing(self):
+        output = self.root / "classification_work_template.json"
+        result = create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            output,
+        )
+        template = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["template_only"])
+        self.assertTrue(result["requires_agent_review"])
+        self.assertEqual(result["node_count"], 5)
+        self.assertEqual(result["background_count"], 1)
+        self.assertEqual(result["non_background_node_count"], 4)
+        self.assertFalse(result["full_visual_coverage"])
+        self.assertTrue(template["template_only"])
+        self.assertEqual(len(template["nodes"]), 5)
+
+        background = next(
+            item for item in template["nodes"]
+            if item["node_key"] == "root/L3"
+        )
+        self.assertEqual(background["classification_seed"]["role"], "background")
+        self.assertEqual(
+            background["classification_seed"]["evidence"][0]["fields"],
+            {"is_background": True},
+        )
+
+        pending = next(
+            item for item in template["nodes"]
+            if item["node_key"] == "root/G1/L0"
+        )
+        self.assertEqual(pending["classification_seed"]["role"], "unknown")
+        self.assertEqual(pending["classification_seed"]["status"], "pending_agent_review")
+        self.assertIsNone(pending["classification_seed"]["confidence"])
+        self.assertEqual(pending["classification_seed"]["evidence"], [])
+        self.assertIn(
+            "text_content",
+            [item["type"] for item in pending["available_evidence"]],
+        )
+        self.assertFalse(template["classification_policy"]["do_not_infer_scientific_meaning_from_layer_names_alone"])
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+
+    def test_classification_template_rejects_stale_inspection_hash(self):
+        stale = json.loads(json.dumps(self.inspection))
+        stale["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "does not match inspection_report"):
+            create_psd_classification_template(
+                self.input_psd,
+                stale,
+                self.root / "stale_template.json",
+            )
 
     def test_layer_name_and_layer_type_evidence_must_match_inspection(self):
         wrong_name = _make_valid_classification(self.inspection)
