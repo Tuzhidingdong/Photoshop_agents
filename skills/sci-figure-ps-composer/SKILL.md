@@ -234,7 +234,7 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 3. Stage 8A `inspect_psd`: implemented; returns a read-only, mixed-order layer tree and source integrity hashes. Real Photoshop 2026 integration passed against a 19-layer research figure (6 groups, 6 text layers, 4 Smart Objects).
 4. Stage 8B `apply_organize_plan`: implemented as an explicitly approved, structure-only plan executor operating on a temporary byte-identical PSD copy and saving to a new PSD. Real Photoshop 2026 integration passed by moving an embedded Smart Object into a new group, reopening the output, and verifying 20 layers, unchanged text/Smart Object counts, and unchanged source SHA-256.
 5. Stage 9A `preview_psd_layers`: implemented; exports a composite preview and isolated previews of selected layers/groups from disposable copies, then builds a labeled contact sheet and JSON manifest. Real Photoshop 2026 integration passed: 12/12 selected previews succeeded, 0 failed, and source SHA-256 was unchanged. The tested run selected only the first 12 nodes; full-tree visual coverage still requires a run with a larger `--max-previews` value.
-6. Stage 9B content-grounded semantic classification and plan proposal: next milestone. The classifier must use the inspection report, composite preview, and isolated layer previews; cite evidence per node; distinguish explicit metadata/name evidence from visual inference; mark uncertain roles as `unknown`; and never apply proposed operations without approval.
+6. Stage 9B evidence-grounded classification and plan drafting: implemented with a model-independent JSON contract and Python validation. It checks full node coverage, unique node keys, source/tree fingerprints, confidence, role compatibility, and evidence against actual inspection/preview artifacts. It can produce an unapproved structure-only organizer plan draft; the user must inspect it and separately approve execution. Real Photoshop is not required for this metadata/JSON validation stage.
 
 ## Existing PSD inspection and organization
 
@@ -324,6 +324,140 @@ python scripts/ps_sci_toolkit.py --action apply-organize-plan `
 The CLI requires `--confirm-plan`. The API requires `approved=True`. The executor copies the source PSD to a temporary working file, applies only the approved structural operations, saves to a temporary PSD in the output directory, reopens and verifies the edited structure, then atomically moves the verified file to the requested output path. The original PSD is never saved or overwritten. Existing output files are protected unless `--overwrite` is explicit.
 
 Organizer v1 does not delete, merge, flatten, rasterize, resample, crop, transform, or alter pixel data. It cannot reconstruct independent layers from a flattened image. Clipping-mask moves are rejected because reparenting can change their rendering relationship. Unknown scientific meaning remains a human classification decision, not an automatic guess.
+
+## Stage 9B: semantic classification and reviewable plan drafting
+
+The Photoshop Skill does not run a hidden vision model or silently infer scientific meaning. The Antigravity agent (or another explicitly selected vision-capable model) reviews the Stage 9A composite/contact sheet and isolated previews, authors a JSON classification report, and asks the user to resolve ambiguous roles. The Python toolkit validates that report against the exact PSD and evidence artifacts.
+
+### Classification report contract
+
+One record is required for every inspected `node_key`. Use `unknown` when the evidence does not support a reliable role. Do not omit uncertain or hidden nodes.
+
+Allowed roles:
+
+- `panel_group`, `panel_image`, `panel_label`
+- `scale_bar`, `scale_label`
+- `axis`, `axis_label`, `legend`, `title`, `annotation`
+- `decoration`, `background`, `test_artifact`, `unknown`
+
+Each record contains a confidence in [0, 1], a concise rationale, and at least one typed evidence item. Evidence types are `layer_name`, `layer_type`, `text_content`, `geometry`, `visual_preview`, `composite_context`, and `user_instruction`.
+
+~~~json
+{
+  "schema_version": 1,
+  "source_sha256": "<copy from inspection_report.json>",
+  "layer_tree_sha256": "<copy from inspection_report.json>",
+  "classifications": [
+    {
+      "node_key": "root/G0/L0",
+      "role": "panel_label",
+      "confidence": 0.98,
+      "rationale": "The node is an editable text layer named Panel_Label_d and its text is the panel identifier.",
+      "evidence": [
+        {
+          "type": "layer_name",
+          "observation": "Panel_Label_d"
+        },
+        {
+          "type": "text_content",
+          "observation": "d"
+        },
+        {
+          "type": "visual_preview",
+          "preview_node_key": "root/G0/L0",
+          "observation": "The isolated preview shows a small lowercase panel marker near the panel corner."
+        }
+      ]
+    },
+    {
+      "node_key": "root/G0/L1",
+      "role": "panel_image",
+      "confidence": 0.99,
+      "rationale": "The embedded Smart Object is the visual image content inside the corresponding panel group.",
+      "evidence": [
+        {
+          "type": "layer_type",
+          "observation": "LayerKind.SMARTOBJECT"
+        },
+        {
+          "type": "visual_preview",
+          "preview_node_key": "root/G0/L1",
+          "observation": "The isolated preview shows the panel's scientific image."
+        },
+        {
+          "type": "composite_context",
+          "observation": "The same image occupies the visual body of panel d in the composite."
+        }
+      ]
+    }
+  ]
+}
+~~~
+
+The example is illustrative only; a usable report must include every node in the inspection JSON exactly once. A partial Stage 9A preview run can still support metadata-based classifications, but it cannot support `visual_preview` evidence for nodes that were not previewed. Run Stage 9A with a sufficiently high `--max-previews` (up to 200) when full visual coverage is needed.
+
+Evidence validation rules:
+
+- `layer_name` must quote the exact inspected layer name.
+- `layer_type` must match the inspected Photoshop kind or typename.
+- `text_content` must quote text actually present in a native text layer.
+- `geometry` must include the exact inspected `bounds_px` array.
+- `visual_preview` must refer to a successful isolated preview for the same node key.
+- `composite_context` requires an existing composite preview in a matching preview manifest.
+- `user_instruction` must explicitly set `source: "user"`.
+- Confidence below 0.45 produces a warning; visual roles without visual evidence produce a warning. Warnings do not authorize automatic actions.
+
+Validate a model-authored classification:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action validate-psd-classification `
+  --input-psd Figure_legacy.psd `
+  --inspection-report Figure_legacy_inspection.json `
+  --preview-report Figure_legacy_visual_index/preview_report.json `
+  --classification-report Figure_legacy_classification.json `
+  --execution-mode quiet --json
+~~~
+
+The validator checks that the current PSD hash still matches the inspection report, that the classification references the same layer-tree fingerprint, that every inspected node is accounted for exactly once, and that all supplied evidence references are valid. It does not change the PSD.
+
+### Create an unapproved organizer-plan draft
+
+The agent may prepare a separate JSON array of proposed structure-only operations after analyzing the classification and discussing the desired structure with the user:
+
+~~~json
+[
+  {
+    "action": "create_group",
+    "key": "panel_d_clean",
+    "name": "Panel_D",
+    "parent": "root"
+  },
+  {
+    "action": "move_layer",
+    "target": "root/G0/L1",
+    "expected_name": "Image_Panel_d",
+    "destination": "panel_d_clean",
+    "position": "end"
+  }
+]
+~~~
+
+Create a reviewable draft:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action create-organize-plan-draft `
+  --input-psd Figure_legacy.psd `
+  --inspection-report Figure_legacy_inspection.json `
+  --preview-report Figure_legacy_visual_index/preview_report.json `
+  --classification-report Figure_legacy_classification.json `
+  --plan-operations Figure_legacy_proposed_operations.json `
+  --output Figure_legacy_organize_plan_DRAFT.json `
+  --execution-mode quiet --json
+~~~
+
+The draft records `requires_user_approval: true`, `approved: false`, source/tree hashes, classification hash, warnings, and the normalized operations. It is not executable merely because it was generated. The agent must display the exact before/after layer paths and every operation, explain visual/structural consequences, and obtain explicit user approval. Only then may the separate `apply-organize-plan --confirm-plan` workflow be invoked, which still applies changes to a temporary PSD copy and saves a new output PSD.
+
+Never propose moving a layer solely because its name looks like a panel/image. Preserve layer visibility, clipping relationships, masks, and Smart Objects; mark ambiguous scientific purpose as `unknown` and ask the user rather than inventing semantics.
 
 ## Existing PSD visual preview index
 
