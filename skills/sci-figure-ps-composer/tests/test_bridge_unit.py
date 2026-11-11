@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+from PIL import Image
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from ps_sci_toolkit import PhotoshopBridge, PhotoshopBridgeError
+from ps_sci_toolkit import (
+    PhotoshopBridge,
+    PhotoshopBridgeError,
+    calculate_grid_layout,
+    cm_to_pixels,
+    compose_grid,
+)
 
 
 class FakePhotoshopApplication:
@@ -132,6 +141,133 @@ class PhotoshopBridgeUnitTests(unittest.TestCase):
         self.assertEqual(caught.exception.exception_type, "ExtendScriptError")
         self.assertIn("Cannot set units", str(caught.exception))
         self.assertIn("line 44", str(caught.exception))
+
+
+
+class FakeComposeBridge:
+    def __init__(self, response):
+        self.response = response
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        return self.response
+
+
+class ComposeGridUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.images = []
+        for index, color in enumerate(("red", "blue", "green", "orange")):
+            path = self.root / f"panel_{index + 1}.png"
+            Image.new("RGB", (100, 100), color=color).save(path)
+            self.images.append(path)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_double_column_width_is_2079_pixels_at_300_dpi(self):
+        self.assertEqual(cm_to_pixels(17.6, 300), 2079)
+
+    def test_layout_derives_square_2_by_2_height(self):
+        layout = calculate_grid_layout(
+            [(100, 100)] * 4,
+            width_cm=17.6,
+            rows=2,
+            cols=2,
+            dpi=300,
+            margin_cm=0.3,
+            gap_cm=0.2,
+        )
+
+        self.assertEqual(layout["width_px"], 2079)
+        self.assertEqual(layout["height_px"], 2079)
+        self.assertEqual(len(layout["panels"]), 4)
+        self.assertEqual(
+            [panel["panel"] for panel in layout["panels"]],
+            ["a", "b", "c", "d"],
+        )
+        self.assertLess(layout["panels"][0]["x"], layout["panels"][1]["x"])
+        self.assertLess(layout["panels"][0]["y"], layout["panels"][2]["y"])
+
+    def test_custom_height_is_respected(self):
+        layout = calculate_grid_layout(
+            [(160, 90)] * 4,
+            width_cm=17.6,
+            height_cm=10.0,
+            rows=2,
+            cols=2,
+            dpi=300,
+        )
+        self.assertEqual(layout["height_px"], 1181)
+
+    def test_layout_rejects_wrong_number_of_images(self):
+        with self.assertRaises(ValueError):
+            calculate_grid_layout(
+                [(100, 100)] * 3,
+                width_cm=17.6,
+                rows=2,
+                cols=2,
+            )
+
+    def test_compose_grid_builds_native_smart_object_jsx(self):
+        layout = calculate_grid_layout(
+            [(100, 100)] * 4,
+            width_cm=17.6,
+            rows=2,
+            cols=2,
+            dpi=300,
+            margin_cm=0.3,
+            gap_cm=0.2,
+        )
+        bridge = FakeComposeBridge(
+            "SCI_PS_COMPOSE\\tOK\\tDemo\\t2079\\t2079\\t300\\t4\\t0\\t"
+            .replace("\\\\t", "\\t")
+        )
+
+        original_sizes = [path.stat().st_size for path in self.images]
+        result = compose_grid(
+            self.images,
+            preset="double",
+            rows=2,
+            cols=2,
+            dpi=300,
+            margin_cm=0.3,
+            gap_cm=0.2,
+            auto_trim=True,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["width_px"], layout["width_px"])
+        self.assertEqual(result["height_px"], layout["height_px"])
+        self.assertEqual(result["panel_count"], 4)
+        self.assertTrue(result["auto_trim"])
+        self.assertIn('executeAction(charIDToTypeID("Plc ")', bridge.jsx_calls[0])
+        self.assertIn('placedLayerEditContents', bridge.jsx_calls[0])
+        self.assertIn('TrimType.TOPLEFT', bridge.jsx_calls[0])
+        self.assertIn('TrimType.TRANSPARENT', bridge.jsx_calls[0])
+        self.assertIn('Group_Panel_a', bridge.jsx_calls[0])
+        self.assertEqual(original_sizes, [path.stat().st_size for path in self.images])
+
+    def test_compose_grid_rejects_existing_output_without_overwrite(self):
+        output = self.root / "existing.psd"
+        output.write_bytes(b"keep")
+        bridge = FakeComposeBridge("unused")
+
+        with self.assertRaises(FileExistsError):
+            compose_grid(
+                self.images,
+                output,
+                preset="double",
+                rows=2,
+                cols=2,
+                bridge=bridge,
+            )
+
+        self.assertEqual(output.read_bytes(), b"keep")
+        self.assertEqual(bridge.jsx_calls, [])
 
 
 if __name__ == "__main__":
