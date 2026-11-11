@@ -34,6 +34,7 @@ from ps_sci_toolkit import (
     _build_preview_psd_layers_jsx,
     validate_psd_classification,
     create_psd_classification_template,
+    _suggest_psd_semantic_role,
     create_organize_plan_draft,
     _parse_psd_preview_records,
     preview_psd_layers,
@@ -1491,6 +1492,86 @@ class PsdSemanticClassificationTests(unittest.TestCase):
                 self.input_psd, self.inspection_path, wrong_flag
             )
 
+    def test_role_suggestions_are_conservative_hints_from_multiple_metadata_fields(self):
+        layers = [
+            {
+                "node_key": "root/G0", "parent_key": "root", "name": "Group_Panel_c",
+                "typename": "LayerSet", "kind": "LayerSet", "is_background": False,
+            },
+            {
+                "node_key": "root/G0/L0", "parent_key": "root/G0", "name": "Panel_Label_c",
+                "typename": "ArtLayer", "kind": "LayerKind.TEXT", "is_background": False,
+                "text": {"contents": "c"},
+            },
+            {
+                "node_key": "root/G0/L1", "parent_key": "root/G0", "name": "Image_Panel_c",
+                "typename": "ArtLayer", "kind": "LayerKind.SMARTOBJECT", "is_background": False,
+            },
+            {
+                "node_key": "root/G1", "parent_key": "root", "name": "Group_Panel_a",
+                "typename": "LayerSet", "kind": "LayerSet", "is_background": False,
+            },
+            {
+                "node_key": "root/G1/L0", "parent_key": "root/G1", "name": "Scale_Label_a",
+                "typename": "ArtLayer", "kind": "LayerKind.TEXT", "is_background": False,
+                "text": {"contents": "10 µm"},
+            },
+            {
+                "node_key": "root/G1/L1", "parent_key": "root/G1", "name": "Scale_Bar_a",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": False,
+            },
+            {
+                "node_key": "root/G1/L2", "parent_key": "root/G1", "name": "Scale_Bar_Outline_a",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": False,
+            },
+            {
+                "node_key": "root/G2", "parent_key": "root", "name": "Stage5_Test_Outer",
+                "typename": "LayerSet", "kind": "LayerSet", "is_background": False,
+            },
+            {
+                "node_key": "root/G3", "parent_key": "root", "name": "Background",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": False,
+            },
+            {
+                "node_key": "root/L4", "parent_key": "root", "name": "背景",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": True,
+            },
+        ]
+        layer_by_key = {layer["node_key"]: layer for layer in layers}
+        expected = {
+            "root/G0": "panel_group",
+            "root/G0/L0": "panel_label",
+            "root/G0/L1": "panel_image",
+            "root/G1/L0": "scale_label",
+            "root/G1/L1": "scale_bar",
+            "root/G1/L2": "scale_bar",
+            "root/G2": "test_artifact",
+            "root/G3": "unknown",
+            "root/L4": "background",
+        }
+
+        for key, expected_role in expected.items():
+            with self.subTest(node_key=key):
+                suggestion = _suggest_psd_semantic_role(layer_by_key[key], layer_by_key)
+                self.assertEqual(suggestion["candidate_role"], expected_role)
+                self.assertFalse(suggestion["is_final_classification"])
+                if expected_role != "background":
+                    self.assertTrue(suggestion["requires_visual_confirmation"])
+
+        mismatched_label = dict(layer_by_key["root/G0/L0"])
+        mismatched_label["text"] = {"contents": "a"}
+        self.assertEqual(
+            _suggest_psd_semantic_role(mismatched_label, layer_by_key)["candidate_role"],
+            "unknown",
+        )
+
+        mismatched_image = dict(layer_by_key["root/G0/L1"])
+        mismatched_image["parent_key"] = "root/G1"
+        self.assertEqual(
+            _suggest_psd_semantic_role(mismatched_image, layer_by_key)["candidate_role"],
+            "unknown",
+        )
+
     def test_create_psd_classification_template_covers_all_nodes_without_guessing(self):
         output = self.root / "classification_work_template.json"
         result = create_psd_classification_template(
@@ -1528,6 +1609,8 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         self.assertEqual(pending["classification_seed"]["status"], "pending_agent_review")
         self.assertIsNone(pending["classification_seed"]["confidence"])
         self.assertEqual(pending["classification_seed"]["evidence"], [])
+        self.assertEqual(pending["role_suggestion"]["candidate_role"], "unknown")
+        self.assertFalse(pending["role_suggestion"]["is_final_classification"])
         self.assertIn(
             "text_content",
             [item["type"] for item in pending["available_evidence"]],
