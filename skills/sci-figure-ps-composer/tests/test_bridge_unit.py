@@ -1532,7 +1532,7 @@ class PsdSemanticClassificationTests(unittest.TestCase):
             "text_content",
             [item["type"] for item in pending["available_evidence"]],
         )
-        self.assertFalse(template["classification_policy"]["do_not_infer_scientific_meaning_from_layer_names_alone"])
+        self.assertTrue(template["classification_policy"]["do_not_infer_scientific_meaning_from_layer_names_alone"])
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
 
     def test_classification_template_rejects_stale_inspection_hash(self):
@@ -1596,7 +1596,8 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["layer_count"], 5)
         self.assertEqual(result["classified_count"], 5)
-        self.assertEqual(result["role_counts"]["unknown"], 2)
+        self.assertEqual(result["role_counts"]["unknown"], 1)
+        self.assertEqual(result["role_counts"]["background"], 1)
         self.assertEqual(result["role_counts"]["title"], 1)
         self.assertEqual(len(result["classification_sha256"]), 64)
         self.assertTrue(result["source_sha256"] == self.inspection["source_sha256"])
