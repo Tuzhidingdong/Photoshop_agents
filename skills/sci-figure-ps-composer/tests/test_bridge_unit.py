@@ -1091,12 +1091,13 @@ def _encode_inspection_record(values):
 def _make_inspection_response():
     rows = [
         _encode_inspection_record(["DOC", "Legacy Figure", 1200, 800, 300, "RGB", "sRGB IEC61966-2.1"]),
-        _encode_inspection_record(["COUNT", 4]),
+        _encode_inspection_record(["COUNT", 5]),
         _encode_inspection_record([
-            "LAYER", "root/L0", "root", 0, 0, "ArtLayer", "Background",
-            "LayerKind.NORMAL", True, 100, "BlendMode.NORMAL", True, True, True,
-            True, False, 0, 0, 1200, 800, "", "", "", "",
-            "Legacy Figure/Background",
+            "LAYER", "root/L0", "root", 0, 0, "ArtLayer", "Title",
+            "LayerKind.TEXT", True, 100, "BlendMode.NORMAL", False, False,
+            False, False, False, 300, 40, 900, 90, "A figure title",
+            "ArialMT", 16, "#000000",
+            "Legacy Figure/Title",
         ]),
         _encode_inspection_record([
             "LAYER", "root/G1", "root", 1, 0, "LayerSet", "Old Group",
@@ -1117,11 +1118,16 @@ def _make_inspection_response():
             False, False, False, False, 720, 100, 1180, 700, "", "", "", "",
             "Legacy Figure/Micrograph",
         ]),
+        _encode_inspection_record([
+            "LAYER", "root/L3", "root", 3, 0, "ArtLayer", "Background",
+            "LayerKind.NORMAL", True, 100, "BlendMode.NORMAL", True, True, True,
+            True, False, 0, 0, 1200, 800, "", "", "", "",
+            "Legacy Figure/Background",
+        ]),
     ]
-    # The deliberately ordered record count is four: background, group,
-    # nested text, and the Smart Object.
+    # The mixed layer collection is front-to-back: the locked Background
+    # layer remains at the final index.
     return "SCI_PS_INSPECT_PSD\tOK\t" + "\n".join(rows)
-
 
 class InspectPsdUnitTests(unittest.TestCase):
     def setUp(self):
@@ -1138,7 +1144,7 @@ class InspectPsdUnitTests(unittest.TestCase):
         result = inspect_psd(self.input_psd, bridge=bridge)
 
         self.assertTrue(result["passed"])
-        self.assertEqual(result["layer_count"], 4)
+        self.assertEqual(result["layer_count"], 5)
         self.assertEqual(result["group_count"], 1)
         self.assertEqual(result["text_layer_count"], 1)
         self.assertEqual(result["smart_object_count"], 1)
@@ -1161,7 +1167,7 @@ class InspectPsdUnitTests(unittest.TestCase):
         self.assertEqual(result["report_path"], str(report_path))
         saved = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["source_sha256"], result["source_sha256"])
-        self.assertEqual(saved["layer_count"], 4)
+        self.assertEqual(saved["layer_count"], 5)
 
     def test_inspect_psd_does_not_overwrite_an_existing_report(self):
         report_path = self.root / "existing.json"
@@ -1230,7 +1236,7 @@ class OrganizePlanValidationTests(unittest.TestCase):
                 "target": "root/L2",
                 "expected_name": "Micrograph",
                 "relative_to": "root/L0",
-                "relative_expected_name": "Background",
+                "relative_expected_name": "Title",
                 "position": "before",
             },
             {
@@ -1282,7 +1288,7 @@ class OrganizePlanValidationTests(unittest.TestCase):
 
     def test_plan_rejects_moving_background_locked_or_clipping_layers(self):
         plan = self.plan([
-            {"action": "move_layer", "target": "root/L0", "expected_name": "Background", "destination": "root/G1"}
+            {"action": "move_layer", "target": "root/L3", "expected_name": "Background", "destination": "root/G1"}
         ])
         with self.assertRaisesRegex(ValueError, "background"):
             _validate_organize_plan(plan, self.inspection)
@@ -1321,7 +1327,7 @@ class OrganizePlanValidationTests(unittest.TestCase):
         inspection["layers"].append({
             "node_key": "root/G3",
             "parent_key": "root",
-            "stack_index": 3,
+            "stack_index": 4,
             "depth": 0,
             "typename": "LayerSet",
             "name": "Other Group",
