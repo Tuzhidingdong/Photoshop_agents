@@ -1437,7 +1437,11 @@ class PsdSemanticClassificationTests(unittest.TestCase):
 
     def test_layer_name_and_layer_type_evidence_must_match_inspection(self):
         wrong_name = _make_valid_classification(self.inspection)
-        wrong_name["classifications"][0]["evidence"][0]["observation"] = "Invented group name"
+        named_item = next(
+            item for item in wrong_name["classifications"]
+            if item["evidence"][0]["type"] == "layer_name"
+        )
+        named_item["evidence"][0]["observation"] = "Invented group name"
         with self.assertRaisesRegex(ValueError, "exact inspected layer name"):
             validate_psd_classification(self.input_psd, self.inspection_path, wrong_name)
 
