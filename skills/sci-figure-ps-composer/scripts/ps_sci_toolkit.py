@@ -4830,6 +4830,31 @@ def apply_organize_plan(
             )
 
         after = inspect_psd(staged_output, bridge=active_bridge)
+        expected_layer_count = before["layer_count"] + len(normalized["created_groups"])
+        expected_group_count = before["group_count"] + len(normalized["created_groups"])
+        if (
+            after["layer_count"] != expected_layer_count
+            or after["group_count"] != expected_group_count
+            or after["text_layer_count"] != before["text_layer_count"]
+            or after["smart_object_count"] != before["smart_object_count"]
+        ):
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "The reopened PSD changed layer/content-category counts beyond the approved group creation: "
+                + repr({
+                    "layers_before": before["layer_count"],
+                    "layers_after": after["layer_count"],
+                    "layers_expected": expected_layer_count,
+                    "groups_before": before["group_count"],
+                    "groups_after": after["group_count"],
+                    "groups_expected": expected_group_count,
+                    "text_before": before["text_layer_count"],
+                    "text_after": after["text_layer_count"],
+                    "smart_objects_before": before["smart_object_count"],
+                    "smart_objects_after": after["smart_object_count"],
+                }),
+                exception_type="OrganizerContentCountMismatch",
+            )
         after_by_key = {layer["node_key"]: layer for layer in after["layers"]}
 
         for identity, observed in verified_refs.items():
