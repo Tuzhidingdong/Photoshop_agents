@@ -1378,6 +1378,23 @@ class OrganizePlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must appear before"):
             _validate_organize_plan(plan, self.inspection)
 
+    def test_plan_rejects_moving_a_layer_inside_a_locked_ancestor_group(self):
+        inspection = json.loads(json.dumps(self.inspection))
+        group = next(layer for layer in inspection["layers"] if layer["node_key"] == "root/G1")
+        group["all_locked"] = True
+        plan = self.plan([
+            {"action": "create_group", "key": "new_group", "name": "New", "parent": "root"},
+            {
+                "action": "move_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "destination": "new_group",
+                "position": "end",
+            },
+        ])
+        with self.assertRaisesRegex(ValueError, "child of a locked group"):
+            _validate_organize_plan(plan, inspection)
+
     def test_group_parent_rejects_position_locked_groups(self):
         inspection = json.loads(json.dumps(self.inspection))
         group = next(layer for layer in inspection["layers"] if layer["node_key"] == "root/G1")
