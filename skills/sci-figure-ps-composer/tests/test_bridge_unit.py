@@ -743,13 +743,14 @@ class UnifyFontsUnitTests(unittest.TestCase):
 
     def test_unify_fonts_rejects_incomplete_photoshop_response(self):
         bridge = self._bridge(text_count="6", changed_count="5")
-        with self.assertRaises(Exception):
+        with self.assertRaises(PhotoshopBridgeError) as caught:
             unify_fonts(
                 self.input_psd,
                 self.output_psd,
                 size_pt=9,
                 bridge=bridge,
             )
+        self.assertEqual(caught.exception.exception_type, "TextLayerCountMismatch")
 
 
 
