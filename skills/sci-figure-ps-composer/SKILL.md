@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences.
+The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs; Stage 8 real-Photoshop verification is pending.
 
 ## Runtime requirements
 
@@ -147,6 +147,23 @@ The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups
 
 The unit lock intentionally changes Photoshop's global preferences and leaves them set to Pixels and Points. It does not create, close, or modify a document.
 
+### Execution modes
+
+Every CLI action accepts `--execution-mode quiet|interactive`; the default is `quiet`.
+
+- `quiet` replaces script dialog calls with `DialogModes.NO` so supported operations do not wait for Photoshop dialogs.
+- `interactive` permits Photoshop dialogs by using `DialogModes.ALL`; use it when troubleshooting a save/export prompt or intentionally running a dialog-driven script.
+- Both modes require a running desktop Photoshop process connected through Windows COM. This is not a true server/headless mode: Photoshop must remain installed and running, ExtendScript/COM execution is synchronous and blocks Photoshop while the script runs, and the toolkit does not guarantee that Photoshop will never become the foreground window.
+- The bridge restores the previous `app.displayDialogs` value and unit preferences in document operations that temporarily change them. The explicit `lock-units` action and `diagnose` intentionally leave Pixels/Points set as documented above.
+
+Example:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action inspect-psd --input-psd Figure_legacy.psd --execution-mode quiet --json
+~~~
+
+For background/batch use, keep Photoshop open in the user's Windows desktop session and avoid concurrently interacting with the same document while a synchronous script is running.
+
 ## Agent workflow
 
 ### Before any document operation
@@ -157,6 +174,11 @@ The unit lock intentionally changes Photoshop's global preferences and leaves th
 - If COM connection fails, stop before attempting document changes. Report the stage and original error.
 - If JSX execution works but unit verification fails, stop and report the observed values; do not silently proceed with geometry calculations.
 - Never claim real Photoshop integration passed based only on mocked tests.
+- For an existing PSD, run `inspect-psd` before proposing any structural edits. Preserve the returned ordered layer tree and source hashes.
+- Show the user the exact proposed organizer operations, affected layer names/paths, and any uncertain classifications. Do not infer scientific meaning from names or visual appearance alone.
+- Do not run `apply-organize-plan` until the user explicitly approves the displayed plan. The plan must bind to both `source_sha256` and `layer_tree_sha256`; a stale plan must be regenerated.
+- Organizer v1 may create groups, rename layers, move/reorder layers, and change visibility. It must not delete, merge, flatten, rasterize, resample, crop, transform, or alter pixel content. It rejects moving background, locked, position-locked, or clipping-mask layers.
+- Always write the organized result to a new PSD path. Retain the user's original PSD and verify its SHA-256 is unchanged.
 
 ### JSX authoring requirements
 
@@ -205,13 +227,101 @@ When `auto_trim=True`, Pillow inspects each source file without modifying or re-
 
 The output path must end in `.psd`. Existing files are protected unless `overwrite=True` is explicitly requested. After Photoshop reports success, Python checks the calculated canvas dimensions and verifies that the PSD exists and is non-empty. This save check does not replace reopening the PSD in Photoshop and inspecting its Smart Objects.
 
-## Remaining feature milestones
+## Feature milestones
 
-1. `add_panel_labels`: implemented; CI and real Photoshop Stage 3 integration verified.
-2. `add_scale_bar`: implemented; CI and real Photoshop Stage 4 integration verified.
-3. `unify_fonts`: implemented; unit tests and real Photoshop Stage 5 recursive integration verified.
-4. `export_figure`: implemented; unit tests and real Photoshop Stage 6 export verification passed.
-5. `preflight_figure`: implemented; unit tests cover geometry, PPI, labels/fonts, scale calibration, export metadata, strict mode, and source protection; real Photoshop Stage 7 verification pending.
+1. Photoshop Bridge, `compose_grid`, `add_panel_labels`, `add_scale_bar`, `unify_fonts`, `export_figure`, and `preflight_figure`: implemented; Stages 1–7 passed real Photoshop verification on the user's Photoshop 2026 installation.
+2. Stage 8 execution modes: `quiet` and `interactive` are implemented; unit coverage is included. `quiet` is not true headless execution.
+3. Stage 8A `inspect_psd`: implemented; returns a read-only, mixed-order layer tree and source integrity hashes. Real Photoshop integration verification is pending.
+4. Stage 8B `apply_organize_plan`: implemented as an explicitly approved, structure-only plan executor operating on a temporary byte-identical PSD copy and saving to a new PSD. Unit coverage and real Photoshop integration verification are pending.
+
+## Existing PSD inspection and organization
+
+This workflow is for PSDs created outside this Skill or PSDs whose layer structure has become difficult to maintain. It is separate from `compose_grid`, which creates a new figure from raster inputs.
+
+### Inspect before proposing changes
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action inspect-psd `
+  --input-psd Figure_legacy.psd `
+  --inspection-report Figure_legacy_inspection.json `
+  --execution-mode quiet
+~~~
+
+`inspect_psd` is read-only. It records the document geometry/profile and recursively enumerates the Photoshop `Document.layers` / `LayerSet.layers` collection so interleaved ArtLayer and LayerSet stacking order is retained. Each node contains a stable-within-this-source `node_key` derived from its ordered tree position, parent key, path, name, kind, visibility, opacity, blend mode, lock/clipping flags, pixel bounds, and editable text properties when applicable. The report includes the source PSD SHA-256 and a layer-tree fingerprint.
+
+Node keys are valid only for the inspected source hash and tree fingerprint. They must not be reused after renaming, moving, adding, deleting, or reordering source layers. Run inspection again after any source change.
+
+### Approved organizer plan
+
+The agent must explain the intended changes, including the exact layer paths and operations, then obtain explicit user approval. The plan is JSON:
+
+~~~json
+{
+  "schema_version": 1,
+  "source_sha256": "<copy source_sha256 from inspection report>",
+  "layer_tree_sha256": "<copy layer_tree_sha256 from inspection report>",
+  "operations": [
+    {
+      "action": "create_group",
+      "key": "panel_a",
+      "name": "Panel_A",
+      "parent": "root"
+    },
+    {
+      "action": "rename_layer",
+      "target": "root/G0/L1",
+      "expected_name": "Layer 5 copy",
+      "new_name": "Panel_A_Annotation"
+    },
+    {
+      "action": "move_layer",
+      "target": "root/G0/L1",
+      "expected_name": "Panel_A_Annotation",
+      "destination": "panel_a",
+      "position": "end"
+    },
+    {
+      "action": "reorder_layer",
+      "target": "root/L2",
+      "expected_name": "Legend",
+      "relative_to": "root/L1",
+      "relative_expected_name": "Panel_A",
+      "position": "before"
+    },
+    {
+      "action": "set_visibility",
+      "target": "root/L3",
+      "expected_name": "Old notes",
+      "visible": false
+    }
+  ]
+}
+~~~
+
+Supported operations are:
+
+- `create_group`: create a new named LayerSet under `root`, an existing LayerSet node key, or a group created earlier in the plan. Group keys are unique plan-local identifiers.
+- `rename_layer`: rename an existing layer or group after checking `expected_name`.
+- `move_layer`: move an existing layer/group into `root`, an existing LayerSet, or a created group; `position` is `start` or `end`.
+- `reorder_layer`: move a node `before` or `after` an existing sibling.
+- `set_visibility`: explicitly set `visible` to true or false.
+
+All `create_group` operations must appear first. The executor then applies renames, moves, reorders, and visibility changes in that order. It rejects stale hashes, unknown node keys, ambiguous or unsafe parent relationships, background/locked/position-locked/clipping-mask moves, and cycles such as moving a group into itself or a descendant.
+
+Apply only after approval:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action apply-organize-plan `
+  --input-psd Figure_legacy.psd `
+  --organize-plan Figure_legacy_organize_plan.json `
+  --output Figure_legacy_organized.psd `
+  --confirm-plan `
+  --execution-mode quiet
+~~~
+
+The CLI requires `--confirm-plan`. The API requires `approved=True`. The executor copies the source PSD to a temporary working file, applies only the approved structural operations, saves to a temporary PSD in the output directory, reopens and verifies the edited structure, then atomically moves the verified file to the requested output path. The original PSD is never saved or overwritten. Existing output files are protected unless `--overwrite` is explicit.
+
+Organizer v1 does not delete, merge, flatten, rasterize, resample, crop, transform, or alter pixel data. It cannot reconstruct independent layers from a flattened image. Clipping-mask moves are rejected because reparenting can change their rendering relationship. Unknown scientific meaning remains a human classification decision, not an automatic guess.
 
 ## add_scale_bar: current implementation
 
@@ -388,6 +498,8 @@ python tests/test_add_scale_bar_demo.py --input-psd path\\to\\Figure_Grid_Stage2
 python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
 python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
+python tests/test_inspect_psd_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
+python tests/test_apply_organize_plan_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Each staged integration pass requires the generated PSD or export bundle to be reopened in Photoshop and its native document/layer structure or export metadata to be inspected. The Stage 7 integration pass additionally verifies that the inspected source PSD remains unchanged. Unit tests alone are not proof of Photoshop compatibility.
