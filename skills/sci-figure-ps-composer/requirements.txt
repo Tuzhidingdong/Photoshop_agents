@@ -1,1 +1,2 @@
 photoshop-python-api>=0.24.2,<0.25
+Pillow>=10.0
