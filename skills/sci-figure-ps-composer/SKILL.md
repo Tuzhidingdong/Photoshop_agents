@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge and `compose_grid` have both passed real-machine verification on Photoshop 2026. The editable panel-label operation is implemented and covered by unit tests; its native Photoshop text-layer/save/reopen flow still requires the Stage 3 Windows integration demo. Scale bars, font unification, TIFF/PNG publication export, and publication preflight remain on the roadmap.
+The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization is now implemented and covered by unit tests; its nested-group Photoshop save/reopen flow is the current Stage 5 integration check. TIFF/PNG publication export and publication preflight remain on the roadmap.
 
 ## Runtime requirements
 
@@ -65,6 +65,12 @@ python scripts/ps_sci_toolkit.py --action add-scale-bar `
   --panel-id a --scale-mode physical --scale-length 10 `
   --pixel-size 0.2 --scale-unit "µm" `
   --bar-color "#000000" --bar-outline "#FFFFFF"
+
+# Recursively normalize every editable text layer in the PSD hierarchy.
+python scripts/ps_sci_toolkit.py --action unify-fonts `
+  --input-psd Figure_1_scalebar.psd --output Figure_1_fonts.psd `
+  --unify-font-postscript ArialMT --unify-font-size-pt 7 `
+  --unify-font-color "#000000"
 ~~~
 
 The default action is diagnose.
@@ -92,6 +98,14 @@ python tests/test_add_scale_bar_demo.py --input-psd path\to\Figure_Grid_Stage2_S
 ~~~
 
 The Stage 4 integration test adds a calibrated 10 µm bar to panel a, with a separate bar layer, contrasting outline layer, and editable text layer. It reopens the output and verifies the bar width against the physical calibration, the bottom-right placement, and preservation of the existing panel label and all other groups. It also verifies that the source PSD hash is unchanged.
+
+After Stage 4 passes, run the Stage 5 recursive font-normalization integration test:
+
+~~~powershell
+python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
+~~~
+
+The Stage 5 demo creates a separate fixture PSD with an additional text layer nested two groups deep, then normalizes the font, point size, and color of every editable text layer into a new PSD. It reopens that output and verifies every text layer, including the nested test layer, as well as preservation of the four panel labels and scale-bar label. Both the supplied input PSD and the generated fixture PSD are checked for unchanged hashes.
 
 ### Bridge behavior
 
@@ -165,8 +179,8 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 ## Remaining feature milestones
 
 1. `add_panel_labels`: implemented; CI and real Photoshop Stage 3 integration verified.
-2. `add_scale_bar`: implemented; CI and real Photoshop Stage 4 integration verification pending.
-3. `unify_fonts`: recursive text-layer traversal and selective font/size/color normalization.
+2. `add_scale_bar`: implemented; CI and real Photoshop Stage 4 integration verified.
+3. `unify_fonts`: implemented with recursive nested-group traversal and selective font/size/color normalization; unit tests pass, real Photoshop Stage 5 verification pending.
 4. `export_figure`: editable PSD plus RGB LZW TIFF and high-resolution PNG.
 5. `preflight_figure`: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
 
@@ -212,6 +226,26 @@ bar width in final document pixels
 ~~~
 
 The scale bar is added only to the selected `Group_Panel_<id>`. Its rectangle and optional contrasting outline are distinct editable raster layers; the caption is a separate editable Photoshop text layer. The group-relative placement is bottom-right with a configurable inset. The input PSD is never saved in place; output must be a different `.psd` path.
+
+## unify_fonts: current implementation
+
+The Python API is:
+
+~~~python
+from ps_sci_toolkit import unify_fonts
+
+result = unify_fonts(
+    "Figure_1_scalebar.psd",
+    "Figure_1_fonts.psd",
+    font_postscript="ArialMT",
+    size_pt=7,
+    color_hex="#000000",
+)
+~~~
+
+At least one normalization attribute is required. Any attribute passed as `None` is left unchanged. The operation traverses every document-level and nested `LayerSet`, finds only native Photoshop `LayerKind.TEXT` layers, and applies the requested font PostScript name, point size, and/or RGB color in one JSX execution. It then reads each changed value back for verification and saves a separate editable PSD. Raster layers and embedded Smart Objects are not modified. The source PSD is never saved in place.
+
+The CLI options are `--unify-font-postscript`, `--unify-font-size-pt`, and `--unify-font-color`; specify at least one. The real Photoshop demo deliberately inserts a text layer two groups deep before normalization to prove the recursive traversal, then reopens the result to check every text layer.
 Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
 
 ## Error handling
@@ -241,6 +275,7 @@ python scripts/ps_sci_toolkit.py --action diagnose
 python tests/test_compose_grid_demo.py
 python tests/test_add_panel_labels_demo.py --input-psd path\\to\\Figure_Grid_Stage2.psd
 python tests/test_add_scale_bar_demo.py --input-psd path\\to\\Figure_Grid_Stage2_Stage3_Labeled.psd
+python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Stage 2 and Stage 3 integration passes additionally require the respective saved PSDs to be reopened in Photoshop and their native document/layer structures to be inspected. Unit tests alone are not proof of Photoshop compatibility.
