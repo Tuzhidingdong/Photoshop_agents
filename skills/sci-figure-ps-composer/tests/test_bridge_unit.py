@@ -32,6 +32,8 @@ from ps_sci_toolkit import (
     _parse_organize_verify_records,
     _build_apply_organize_plan_jsx,
     _build_preview_psd_layers_jsx,
+    validate_psd_classification,
+    create_organize_plan_draft,
     _parse_psd_preview_records,
     preview_psd_layers,
 )
@@ -1355,6 +1357,235 @@ class PreviewPsdLayersTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "Unknown PSD preview status"):
             _parse_psd_preview_records(bad_status)
+
+
+
+
+def _make_valid_classification(inspection):
+    classifications = []
+    for layer in inspection["layers"]:
+        if layer["typename"] == "LayerSet":
+            role = "panel_group" if layer["name"].startswith("Group_Panel_") else "unknown"
+            evidence = [{
+                "type": "layer_name",
+                "observation": layer["name"],
+            }]
+        elif layer["kind"] == "LayerKind.TEXT":
+            if layer["name"].startswith("Panel_Label_"):
+                role = "panel_label"
+            else:
+                role = "unknown"
+            evidence = [{
+                "type": "text_content",
+                "observation": layer["text"]["contents"],
+            }]
+        elif layer["kind"] == "LayerKind.SMARTOBJECT":
+            role = "panel_image" if layer["name"].startswith("Image_Panel_") else "unknown"
+            evidence = [{
+                "type": "visual_preview",
+                "preview_node_key": layer["node_key"],
+                "observation": "The isolated preview shows the embedded panel image.",
+            }]
+        else:
+            role = "unknown"
+            evidence = [{
+                "type": "layer_type",
+                "observation": layer["kind"],
+            }]
+        classifications.append({
+            "node_key": layer["node_key"],
+            "role": role,
+            "confidence": 0.92 if role != "unknown" else 0.35,
+            "rationale": "Classification is grounded in the recorded layer evidence.",
+            "evidence": evidence,
+        })
+    return {
+        "schema_version": 1,
+        "source_sha256": inspection["source_sha256"],
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "classifications": classifications,
+    }
+
+
+class PsdSemanticClassificationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+        self.inspection = inspect_psd(
+            self.input_psd,
+            bridge=FakeInspectBridge(_make_inspection_response()),
+        )
+        self.inspection_path = self.root / "inspection.json"
+        self.inspection_path.write_text(
+            json.dumps(self.inspection, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.classification = _make_valid_classification(self.inspection)
+        self.classification_path = self.root / "classification.json"
+        self.classification_path.write_text(
+            json.dumps(self.classification, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_validate_classification_checks_every_node_and_evidence(self):
+        result = validate_psd_classification(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["layer_count"], 5)
+        self.assertEqual(result["classified_count"], 5)
+        self.assertEqual(result["role_counts"]["unknown"], 1)
+        self.assertEqual(result["role_counts"]["panel_label"], 1)
+        self.assertEqual(len(result["classification_sha256"]), 64)
+        self.assertTrue(result["source_sha256"] == self.inspection["source_sha256"])
+
+    def test_validate_classification_checks_visual_evidence_against_preview_manifest(self):
+        preview_dir = self.root / "previews"
+        preview_dir.mkdir()
+        image_path = preview_dir / "layer_001.png"
+        image_path.write_bytes(b"fake-png")
+        composite_path = preview_dir / "composite.png"
+        composite_path.write_bytes(b"fake-composite")
+        contact_path = preview_dir / "layer_contact_sheet.png"
+        contact_path.write_bytes(b"fake-contact")
+        layer = next(x for x in self.inspection["layers"] if x["kind"] == "LayerKind.SMARTOBJECT")
+        preview_report = {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_dir),
+            "composite_preview": str(composite_path),
+            "contact_sheet": {"path": str(contact_path)},
+            "previews": [{
+                "node_key": layer["node_key"],
+                "file_name": "layer_001.png",
+                "status": "OK",
+            }],
+        }
+        preview_path = self.root / "preview_report.json"
+        preview_path.write_text(json.dumps(preview_report), encoding="utf-8")
+        result = validate_psd_classification(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+            preview_report=preview_path,
+        )
+        self.assertTrue(result["passed"])
+
+    def test_validate_classification_rejects_stale_hashes_and_missing_nodes(self):
+        stale = json.loads(json.dumps(self.classification))
+        stale["source_sha256"] = "0" * 64
+        stale_path = self.root / "stale.json"
+        stale_path.write_text(json.dumps(stale), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            validate_psd_classification(self.input_psd, self.inspection_path, stale_path)
+
+        missing = json.loads(json.dumps(self.classification))
+        missing["classifications"].pop()
+        missing_path = self.root / "missing.json"
+        missing_path.write_text(json.dumps(missing), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "every inspected node"):
+            validate_psd_classification(self.input_psd, self.inspection_path, missing_path)
+
+    def test_validate_classification_rejects_unknown_nodes_duplicate_roles_and_bad_confidence(self):
+        cases = []
+        unknown = json.loads(json.dumps(self.classification))
+        unknown["classifications"][0]["node_key"] = "root/not-real"
+        cases.append((unknown, "unknown node_key"))
+        duplicate = json.loads(json.dumps(self.classification))
+        duplicate["classifications"][1]["node_key"] = duplicate["classifications"][0]["node_key"]
+        cases.append((duplicate, "Duplicate classification"))
+        bad_confidence = json.loads(json.dumps(self.classification))
+        bad_confidence["classifications"][0]["confidence"] = 1.5
+        cases.append((bad_confidence, "confidence"))
+        for index, (item, message) in enumerate(cases):
+            path = self.root / ("invalid_" + str(index) + ".json")
+            path.write_text(json.dumps(item), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, message):
+                validate_psd_classification(self.input_psd, self.inspection_path, path)
+
+    def test_visual_evidence_requires_a_successful_matching_preview(self):
+        item = json.loads(json.dumps(self.classification))
+        smart = next(x for x in item["classifications"] if x["role"] == "panel_image")
+        with self.assertRaisesRegex(ValueError, "no successful preview"):
+            validate_psd_classification(
+                self.input_psd,
+                self.inspection_path,
+                item,
+                preview_report={
+                    "schema_version": 1,
+                    "source_sha256": self.inspection["source_sha256"],
+                    "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+                    "preview_dir": str(self.root),
+                    "previews": [],
+                },
+            )
+
+    def test_text_evidence_must_reference_a_native_text_layer(self):
+        item = json.loads(json.dumps(self.classification))
+        smart = next(x for x in item["classifications"] if x["role"] == "panel_image")
+        smart["evidence"] = [{
+            "type": "text_content",
+            "observation": "This is not a text layer.",
+        }]
+        with self.assertRaisesRegex(ValueError, "native text layer"):
+            validate_psd_classification(self.input_psd, self.inspection_path, item)
+
+    def test_plan_draft_requires_valid_classification_and_operations_and_is_unapproved(self):
+        output = self.root / "organize_plan_draft.json"
+        operations = [{
+            "action": "create_group",
+            "key": "review_group",
+            "name": "Review_Group",
+            "parent": "root",
+        }]
+        result = create_organize_plan_draft(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+            operations,
+            output,
+        )
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["requires_user_approval"])
+        self.assertFalse(result["approved"])
+        saved = json.loads(output.read_text(encoding="utf-8"))
+        self.assertTrue(saved["requires_user_approval"])
+        self.assertFalse(saved["approved"])
+        self.assertEqual(saved["operations"][0]["action"], "create_group")
+        self.assertEqual(saved["source_sha256"], self.inspection["source_sha256"])
+
+    def test_plan_draft_rejects_unsafe_operations_and_existing_output(self):
+        output = self.root / "unsafe_plan.json"
+        unsafe = [{
+            "action": "delete_layer",
+            "target": "root/G1",
+        }]
+        with self.assertRaisesRegex(ValueError, "Unsupported organizer action"):
+            create_organize_plan_draft(
+                self.input_psd,
+                self.inspection_path,
+                self.classification_path,
+                unsafe,
+                output,
+            )
+        output.write_text("preserve", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            create_organize_plan_draft(
+                self.input_psd,
+                self.inspection_path,
+                self.classification_path,
+                [{"action": "create_group", "key": "g", "name": "G", "parent": "root"}],
+                output,
+            )
+        self.assertEqual(output.read_text(encoding="utf-8"), "preserve")
 
 
 
