@@ -6097,6 +6097,173 @@ def create_psd_classification_template(
     }
 
 
+def finalize_psd_classification_template(
+    template_path: str | Path,
+    output_path: str | Path,
+) -> Dict[str, Any]:
+    """Convert a fully reviewed work template into a validated classification report."""
+    template_file = Path(template_path).expanduser().resolve(strict=True)
+    if not template_file.is_file() or template_file.suffix.lower() != ".json":
+        raise ValueError("template_path must be an existing JSON file.")
+    template, _ = _load_json_object(template_file, "classification_template")
+    if template.get("schema_version") != 1 or template.get("template_type") != "psd_semantic_classification_work_template":
+        raise ValueError("Unsupported PSD classification work template.")
+    if template.get("template_only") is not True:
+        raise ValueError("Input must be an unfinalized classification work template.")
+
+    source_value = template.get("source_psd")
+    inspection_value = template.get("inspection_report")
+    preview_value = template.get("preview_report")
+    if not all(isinstance(value, str) and value.strip() for value in (
+        source_value, inspection_value, preview_value
+    )):
+        raise ValueError(
+            "Template must reference source_psd, inspection_report, and preview_report files."
+        )
+
+    source_file = Path(source_value).expanduser().resolve(strict=True)
+    inspection_file = Path(inspection_value).expanduser().resolve(strict=True)
+    preview_file = Path(preview_value).expanduser().resolve(strict=True)
+    inspection, _ = _load_json_object(inspection_file, "inspection_report")
+    preview_manifest, _ = _load_json_object(preview_file, "preview_report")
+
+    if _sha256_file(source_file) != template.get("source_sha256"):
+        raise ValueError("The source PSD no longer matches the classification template.")
+    if inspection.get("source_sha256") != template.get("source_sha256"):
+        raise ValueError("Inspection report source hash does not match the classification template.")
+    if inspection.get("layer_tree_sha256") != template.get("layer_tree_sha256"):
+        raise ValueError("Inspection report layer-tree hash does not match the classification template.")
+    if preview_manifest.get("source_sha256") != template.get("source_sha256"):
+        raise ValueError("Preview report source hash does not match the classification template.")
+    if preview_manifest.get("layer_tree_sha256") != template.get("layer_tree_sha256"):
+        raise ValueError("Preview report layer-tree hash does not match the classification template.")
+
+    summary = template.get("summary")
+    if not isinstance(summary, dict) or summary.get("full_visual_coverage") is not True:
+        raise ValueError("Classification finalization requires complete isolated-preview coverage.")
+    if summary.get("preview_failure_count") != 0 or summary.get("missing_preview_node_keys") != []:
+        raise ValueError("Classification template contains failed or missing isolated previews.")
+
+    nodes = template.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError("Classification template must contain a non-empty nodes array.")
+    if len(nodes) != inspection.get("layer_count"):
+        raise ValueError("Classification template node count does not match inspection report.")
+
+    seen: set[str] = set()
+    classifications: list[Dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("node_key"), str):
+            raise ValueError("Classification template contains a malformed node.")
+        key = node["node_key"]
+        if key in seen:
+            raise ValueError("Classification template contains duplicate node_key: " + key)
+        seen.add(key)
+
+        seed = node.get("classification_seed")
+        if not isinstance(seed, dict):
+            raise ValueError("Classification seed is missing for " + key)
+        status = seed.get("status")
+        expected_status = "metadata_confirmed" if node.get("is_background") is True else "agent_reviewed"
+        if status != expected_status:
+            raise ValueError(
+                "Node has not completed the required review state: "
+                + key + " (expected " + expected_status + ")"
+            )
+
+        role = seed.get("role")
+        if role not in PSD_SEMANTIC_ROLES:
+            raise ValueError("Node has an unsupported or unresolved final role: " + key)
+        confidence = seed.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValueError("Node requires a finite confidence in [0, 1]: " + key)
+        rationale = seed.get("rationale")
+        if not isinstance(rationale, str) or len(rationale.strip()) < 8:
+            raise ValueError("Node requires a substantive classification rationale: " + key)
+        evidence = seed.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("Node requires classification evidence: " + key)
+        if node.get("is_background") is not True:
+            has_visual = any(
+                isinstance(item, dict) and item.get("type") == "visual_preview"
+                for item in evidence
+            )
+            if not has_visual:
+                raise ValueError(
+                    "Every non-background node requires reviewed visual_preview evidence: " + key
+                )
+        classifications.append({
+            "node_key": key,
+            "role": role,
+            "confidence": float(confidence),
+            "rationale": rationale.strip(),
+            "evidence": evidence,
+        })
+
+    expected_keys = {layer.get("node_key") for layer in inspection.get("layers", [])}
+    if seen != expected_keys:
+        missing = sorted(expected_keys - seen)
+        extra = sorted(seen - expected_keys)
+        raise ValueError(
+            "Classification template does not match the inspected node inventory; "
+            + "missing=" + ", ".join(str(x) for x in missing)
+            + "; extra=" + ", ".join(str(x) for x in extra)
+        )
+
+    classification_report = {
+        "schema_version": 1,
+        "source_sha256": template["source_sha256"],
+        "layer_tree_sha256": template["layer_tree_sha256"],
+        "classifications": classifications,
+    }
+
+    # Run the same strict evidence/role validator used by plan drafting before
+    # writing any finalized report. Invalid reports never reach disk.
+    validation = validate_psd_classification(
+        source_file,
+        inspection_file,
+        classification_report,
+        preview_report=preview_file,
+    )
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".json":
+        raise ValueError("output_path must end in .json.")
+    if output_file == template_file:
+        raise ValueError("Final classification report must not overwrite its work template.")
+    if output_file.exists():
+        raise FileExistsError("Classification output already exists: " + str(output_file))
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_file = output_file.with_name(output_file.stem + ".tmp" + output_file.suffix)
+    try:
+        temp_file.write_text(
+            json.dumps(classification_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_file, output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return {
+        "passed": True,
+        "output_path": str(output_file),
+        "classification_count": len(classifications),
+        "role_counts": validation["role_counts"],
+        "warnings": validation["warnings"],
+        "classification_sha256": _sha256_file(output_file),
+        "template_preserved": template_file.is_file(),
+        "requires_user_approval_for_organization": True,
+        "organizer_operations_created": False,
+    }
+
+
 def _validate_classification_report(
     input_psd: str | Path,
     inspection_report: Dict[str, Any] | str | Path,
