@@ -4007,12 +4007,32 @@ def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
     if len(keys) != len(set(keys)):
         raise ValueError("PSD inspection returned duplicate node keys.")
     known_keys = {"root", *keys}
+    layer_by_key = {layer["node_key"]: layer for layer in parsed["layers"]}
+    siblings: Dict[tuple[str, int], str] = {}
     for layer in parsed["layers"]:
-        if layer["parent_key"] not in known_keys:
+        parent_key = layer["parent_key"]
+        node_key = layer["node_key"]
+        if parent_key not in known_keys:
             raise ValueError(
-                "PSD inspection returned an unknown parent key for "
-                + layer["node_key"]
+                "PSD inspection returned an unknown parent key for " + node_key
             )
+        if node_key.rsplit("/", 1)[0] != parent_key:
+            raise ValueError("PSD inspection returned an inconsistent node path: " + node_key)
+        if parent_key != "root":
+            parent_layer = layer_by_key[parent_key]
+            if parent_layer["typename"] != "LayerSet":
+                raise ValueError("PSD inspection parent is not a LayerSet: " + node_key)
+            if layer["depth"] != parent_layer["depth"] + 1:
+                raise ValueError("PSD inspection returned an inconsistent depth: " + node_key)
+        elif layer["depth"] != 0:
+            raise ValueError("Top-level PSD layer has a non-zero depth: " + node_key)
+        sibling_key = (parent_key, layer["stack_index"])
+        if sibling_key in siblings:
+            raise ValueError(
+                "PSD inspection returned duplicate sibling indices: "
+                + siblings[sibling_key] + " and " + node_key
+            )
+        siblings[sibling_key] = node_key
     return parsed
 
 
@@ -4177,6 +4197,8 @@ def _validate_organize_plan(
         layer = require_layer(key, field)
         if layer["typename"] != "LayerSet":
             raise ValueError(field + " must reference root, a LayerSet, or an earlier created group.")
+        if layer["all_locked"]:
+            raise ValueError(field + " cannot target a fully locked LayerSet.")
         return key
 
     def destination_is_inside_target(destination: str, target_key: str) -> bool:
@@ -4226,6 +4248,8 @@ def _validate_organize_plan(
                 layer = require_layer(target, "rename_layer.target")
                 if target in renamed:
                     raise ValueError("A layer may be renamed only once in one plan: " + target)
+                if layer["is_background"]:
+                    raise ValueError("Background layers cannot be renamed by organizer v1: " + target)
                 expected_name = operation.get("expected_name")
                 if expected_name != layer["name"]:
                     raise ValueError("rename_layer.expected_name no longer matches " + target)
@@ -4254,6 +4278,8 @@ def _validate_organize_plan(
                     destination_layer = require_layer(destination, "move_layer.destination")
                     if destination_layer["typename"] != "LayerSet":
                         raise ValueError("move_layer.destination must be root, a LayerSet, or a created group.")
+                    if destination_layer["all_locked"]:
+                        raise ValueError("move_layer.destination cannot be a fully locked LayerSet.")
                 if layer["typename"] == "LayerSet" and destination_is_inside_target(
                     destination, target
                 ):
@@ -4281,6 +4307,8 @@ def _validate_organize_plan(
                     raise ValueError("reorder_layer.expected_name no longer matches " + target)
                 if operation.get("relative_expected_name") != relative_layer["name"]:
                     raise ValueError("reorder_layer.relative_expected_name no longer matches " + relative)
+                if relative_layer["clipped_to_below"]:
+                    raise ValueError("reorder_layer cannot use a clipping-mask layer as its reference.")
                 if layer["parent_key"] != relative_layer["parent_key"]:
                     raise ValueError("reorder_layer references must be siblings.")
                 if operation.get("position") not in ("before", "after"):
@@ -4294,6 +4322,8 @@ def _validate_organize_plan(
                     raise ValueError("Visibility may be changed only once per layer: " + target)
                 if operation.get("expected_name") != layer["name"]:
                     raise ValueError("set_visibility.expected_name no longer matches " + target)
+                if layer["is_background"]:
+                    raise ValueError("Background-layer visibility cannot be changed by organizer v1.")
                 if not isinstance(operation.get("visible"), bool):
                     raise ValueError("set_visibility.visible must be a boolean.")
                 visibility_set.add(target)
