@@ -5671,11 +5671,25 @@ PSD_SEMANTIC_ROLES = (
 PSD_CLASSIFICATION_EVIDENCE_TYPES = (
     "layer_name",
     "layer_type",
+    "layer_metadata",
     "text_content",
     "geometry",
     "visual_preview",
     "composite_context",
     "user_instruction",
+)
+
+PSD_LAYER_METADATA_EVIDENCE_FIELDS = (
+    "typename",
+    "kind",
+    "visible",
+    "opacity",
+    "blend_mode",
+    "is_background",
+    "all_locked",
+    "position_locked",
+    "pixels_locked",
+    "clipped_to_below",
 )
 
 
@@ -5695,6 +5709,274 @@ def _load_json_object(
         raise ValueError(field + " must be a dictionary or JSON path.")
     loaded = json.loads(json.dumps(value, ensure_ascii=False))
     return loaded, None
+
+
+def create_psd_classification_template(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    output_path: str | Path,
+    *,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Create a complete, evidence-indexed work template without guessing visual roles."""
+    source_file = Path(input_psd).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_psd must be an existing PSD file.")
+
+    inspection, inspection_path = _load_json_object(
+        inspection_report, "inspection_report"
+    )
+    if inspection.get("schema_version") != 1 or inspection.get("passed") is not True:
+        raise ValueError("inspection_report must be a successful schema_version 1 report.")
+    if _sha256_file(source_file) != inspection.get("source_sha256"):
+        raise ValueError("The current PSD does not match inspection_report; re-inspect it.")
+
+    raw_layers = inspection.get("layers")
+    if not isinstance(raw_layers, list) or not raw_layers:
+        raise ValueError("inspection_report must contain a non-empty layers array.")
+    layer_by_key: Dict[str, Dict[str, Any]] = {}
+    for layer in raw_layers:
+        if not isinstance(layer, dict) or not isinstance(layer.get("node_key"), str):
+            raise ValueError("inspection_report contains a malformed layer entry.")
+        key = layer["node_key"]
+        if key in layer_by_key:
+            raise ValueError("inspection_report contains duplicate node_key: " + key)
+        layer_by_key[key] = layer
+
+    preview_by_key: Dict[str, Dict[str, Any]] = {}
+    preview_root: Optional[Path] = None
+    composite_path: Optional[Path] = None
+    if preview_report is not None:
+        preview_manifest, preview_path = _load_json_object(
+            preview_report, "preview_report"
+        )
+        if preview_manifest.get("source_sha256") != inspection.get("source_sha256"):
+            raise ValueError("Preview report source_sha256 does not match inspection report.")
+        if preview_manifest.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+            raise ValueError("Preview report layer_tree_sha256 does not match inspection report.")
+        preview_dir_value = preview_manifest.get("preview_dir")
+        if isinstance(preview_dir_value, str) and preview_dir_value.strip():
+            preview_root = Path(preview_dir_value).expanduser().resolve()
+        elif preview_path is not None:
+            preview_root = preview_path.parent.resolve()
+        else:
+            raise ValueError("preview_report must provide preview_dir.")
+        raw_previews = preview_manifest.get("previews")
+        if not isinstance(raw_previews, list):
+            raise ValueError("preview_report must contain a previews array.")
+        for item in raw_previews:
+            if not isinstance(item, dict) or not isinstance(item.get("node_key"), str):
+                raise ValueError("preview_report contains a malformed preview entry.")
+            key = item["node_key"]
+            if key not in layer_by_key:
+                raise ValueError("preview_report references an unknown node_key: " + key)
+            if key in preview_by_key:
+                raise ValueError("preview_report contains duplicate node_key: " + key)
+            status = item.get("status")
+            if status not in ("OK", "ERROR"):
+                raise ValueError("preview_report contains an invalid preview status: " + key)
+            preview_by_key[key] = item
+
+        for key, item in preview_by_key.items():
+            if item.get("status") != "OK":
+                continue
+            filename = item.get("file_name")
+            if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+                raise ValueError("Successful preview has an unsafe file_name: " + key)
+            preview_file = (preview_root / filename).resolve()
+            try:
+                preview_file.relative_to(preview_root)
+            except ValueError as exc:
+                raise ValueError("Preview file path escapes preview_dir: " + key) from exc
+            if not preview_file.is_file() or preview_file.stat().st_size <= 0:
+                raise ValueError("Successful preview file is missing or empty: " + str(preview_file))
+
+        composite_value = preview_manifest.get("composite_preview")
+        if composite_value:
+            composite_path = Path(composite_value).expanduser().resolve()
+            if not composite_path.is_file() or composite_path.stat().st_size <= 0:
+                raise ValueError("Composite preview is missing or empty.")
+
+    nodes: list[Dict[str, Any]] = []
+    background_count = 0
+    preview_success_count = 0
+    preview_failure_count = 0
+    missing_preview_keys: list[str] = []
+
+    for layer in raw_layers:
+        key = layer["node_key"]
+        evidence_candidates: list[Dict[str, Any]] = [
+            {"type": "layer_name", "observation": layer["name"]},
+            {"type": "layer_type", "observation": layer["kind"] or layer["typename"]},
+        ]
+        bounds = layer.get("bounds_px")
+        if (
+            isinstance(bounds, list)
+            and len(bounds) == 4
+            and all(
+                value is not None
+                and not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                for value in bounds
+            )
+        ):
+            evidence_candidates.append({
+                "type": "geometry",
+                "observation": "Exact Photoshop layer bounds in document pixels.",
+                "bounds_px": bounds,
+            })
+        text_data = layer.get("text")
+        if isinstance(text_data, dict) and isinstance(text_data.get("contents"), str) and text_data["contents"]:
+            evidence_candidates.append({
+                "type": "text_content",
+                "observation": text_data["contents"],
+            })
+        metadata_fields = {
+            field: layer[field]
+            for field in PSD_LAYER_METADATA_EVIDENCE_FIELDS
+            if field in layer and layer[field] is not None
+        }
+        evidence_candidates.append({
+            "type": "layer_metadata",
+            "observation": "Exact Photoshop layer properties copied from the read-only inspection.",
+            "fields": metadata_fields,
+        })
+
+        preview_item = preview_by_key.get(key)
+        preview_info = None
+        if preview_item is None:
+            missing_preview_keys.append(key)
+        elif preview_item.get("status") == "OK":
+            preview_success_count += 1
+            preview_info = {
+                "status": "OK",
+                "file_name": preview_item.get("file_name"),
+                "path": str(preview_root / preview_item["file_name"]) if preview_root else None,
+                "visual_review_required": True,
+            }
+        else:
+            preview_failure_count += 1
+            preview_info = {
+                "status": "ERROR",
+                "error": preview_item.get("error"),
+                "visual_review_required": True,
+            }
+
+        is_background = layer.get("is_background") is True
+        if is_background:
+            background_count += 1
+            seed = {
+                "role": "background",
+                "confidence": 1.0,
+                "rationale": (
+                    "Photoshop explicitly identifies this node as the document Background layer; "
+                    "this is a structural classification, not an inference about figure content."
+                ),
+                "evidence": [{
+                    "type": "layer_metadata",
+                    "observation": "Photoshop marks this node as the document Background layer.",
+                    "fields": {"is_background": True},
+                }],
+                "status": "metadata_confirmed",
+            }
+        else:
+            seed = {
+                "role": "unknown",
+                "confidence": None,
+                "rationale": None,
+                "evidence": [],
+                "status": "pending_agent_review",
+            }
+
+        nodes.append({
+            "node_key": key,
+            "parent_key": layer.get("parent_key"),
+            "stack_index": layer.get("stack_index"),
+            "depth": layer.get("depth"),
+            "path": layer.get("path"),
+            "name": layer.get("name"),
+            "typename": layer.get("typename"),
+            "kind": layer.get("kind"),
+            "bounds_px": bounds,
+            "visible": layer.get("visible"),
+            "is_background": is_background,
+            "text": text_data,
+            "classification_seed": seed,
+            "available_evidence": evidence_candidates,
+            "isolated_preview": preview_info,
+        })
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".json":
+        raise ValueError("output_path must end in .json.")
+    if output_file.exists():
+        raise FileExistsError("Classification template already exists: " + str(output_file))
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    non_background_count = len(raw_layers) - background_count
+    preview_coverage = (
+        preview_success_count == non_background_count
+        and preview_failure_count == 0
+        and not missing_preview_keys
+    ) if preview_report is not None else False
+
+    template = {
+        "schema_version": 1,
+        "template_only": True,
+        "template_type": "psd_semantic_classification_work_template",
+        "requires_agent_review": True,
+        "requires_user_approval_for_organization": True,
+        "source_psd": str(source_file),
+        "source_sha256": inspection["source_sha256"],
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "inspection_report": str(inspection_path) if inspection_path else None,
+        "preview_report": str(preview_report) if isinstance(preview_report, (str, Path)) else None,
+        "summary": {
+            "inspection_layer_count": len(raw_layers),
+            "background_layer_count": background_count,
+            "non_background_node_count": non_background_count,
+            "preview_success_count": preview_success_count,
+            "preview_failure_count": preview_failure_count,
+            "missing_preview_node_keys": missing_preview_keys,
+            "full_visual_coverage": preview_coverage,
+            "composite_preview": str(composite_path) if composite_path else None,
+        },
+        "classification_policy": {
+            "do_not_infer_scientific_meaning_from_layer_names_alone": True,
+            "use_unknown_when_visual_purpose_is_unclear": True,
+            "only_claim_visual_review_after_opening_the_referenced_preview": True,
+            "background_role_is_derived_only_from_photoshop_is_background_flag": True,
+            "do_not_create_organizer_operations_during_classification": True,
+        },
+        "nodes": nodes,
+    }
+
+    temp_file = output_file.with_name(output_file.stem + ".tmp" + output_file.suffix)
+    try:
+        temp_file.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_file, output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return {
+        "passed": True,
+        "template_only": True,
+        "requires_agent_review": True,
+        "output_path": str(output_file),
+        "node_count": len(nodes),
+        "background_count": background_count,
+        "non_background_node_count": non_background_count,
+        "preview_success_count": preview_success_count,
+        "preview_failure_count": preview_failure_count,
+        "full_visual_coverage": preview_coverage,
+        "plan_operations_created": False,
+        "template_sha256": _sha256_file(output_file),
+    }
 
 
 def _validate_classification_report(
