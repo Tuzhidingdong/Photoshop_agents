@@ -16,6 +16,7 @@ from ps_sci_toolkit import (
     calculate_grid_layout,
     cm_to_pixels,
     compose_grid,
+    _detect_trim_steps,
 )
 
 
@@ -245,13 +246,37 @@ class ComposeGridUnitTests(unittest.TestCase):
         self.assertTrue(result["auto_trim"])
         self.assertIn('executeAction(charIDToTypeID("Plc ")', bridge.jsx_calls[0])
         self.assertIn('placedLayerEditContents', bridge.jsx_calls[0])
-        self.assertIn('if (whiteTopLeft)', bridge.jsx_calls[0])
+        self.assertIn('if (trimStep === "transparent")', bridge.jsx_calls[0])
         self.assertIn('smartDoc.trim(TrimType.TOPLEFT, true, true, true, true)', bridge.jsx_calls[0])
         self.assertIn('smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true)', bridge.jsx_calls[0])
-        self.assertIn('} else {', bridge.jsx_calls[0])
+        self.assertIn('panel.trim_steps.length > 0', bridge.jsx_calls[0])
         self.assertIn('doc.close(SaveOptions.DONOTSAVECHANGES)', bridge.jsx_calls[0])
         self.assertIn('Group_Panel_a', bridge.jsx_calls[0])
         self.assertEqual(original_sizes, [path.stat().st_size for path in self.images])
+
+    def test_trim_preflight_detects_opaque_white_margin_without_alpha_trim(self):
+        path = self.root / "white_margin.png"
+        image = Image.new("RGB", (100, 80), "white")
+        draw = __import__("PIL.ImageDraw", fromlist=["ImageDraw"]).Draw(image)
+        draw.rectangle((10, 8, 89, 71), fill=(100, 120, 140))
+        image.save(path)
+
+        self.assertEqual(_detect_trim_steps(path), ["top_left"])
+
+    def test_trim_preflight_detects_transparency_and_skips_unneeded_white_trim(self):
+        path = self.root / "transparent_margin.png"
+        image = Image.new("RGBA", (100, 80), (0, 0, 0, 0))
+        draw = __import__("PIL.ImageDraw", fromlist=["ImageDraw"]).Draw(image)
+        draw.rectangle((10, 8, 89, 71), fill=(100, 120, 140, 255))
+        image.save(path)
+
+        self.assertEqual(_detect_trim_steps(path), ["transparent"])
+
+    def test_trim_preflight_skips_solid_image_without_trim_border(self):
+        path = self.root / "solid.png"
+        Image.new("RGB", (100, 80), (100, 120, 140)).save(path)
+
+        self.assertEqual(_detect_trim_steps(path), [])
 
     def test_compose_grid_rejects_existing_output_without_overwrite(self):
         output = self.root / "existing.psd"
