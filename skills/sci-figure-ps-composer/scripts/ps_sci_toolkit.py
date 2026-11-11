@@ -3959,9 +3959,9 @@ def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
                 "color_profile": values[6],
             }
         elif values[0] == "LAYER":
-            if len(values) != 26:
+            if len(values) != 25:
                 raise ValueError(
-                    "Invalid LAYER inspection record; expected 26 fields, got "
+                    "Invalid LAYER inspection record; expected 25 fields, got "
                     + str(len(values))
                 )
             parsed["layers"].append({
