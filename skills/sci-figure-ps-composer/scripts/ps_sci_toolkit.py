@@ -4603,6 +4603,11 @@ def preview_psd_layers(
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
     inspection = inspect_psd(source_file, bridge=active_bridge)
     layer_by_key = {layer["node_key"]: layer for layer in inspection["layers"]}
+    all_node_keys = set(layer_by_key)
+    eligible_node_keys = {
+        layer["node_key"] for layer in inspection["layers"]
+        if not layer["is_background"]
+    }
 
     if node_keys is None:
         skipped_backgrounds = [
@@ -4726,12 +4731,30 @@ def preview_psd_layers(
                 jsx_preview=_clean_jsx_preview(jsx),
             )
 
+        previewed_keys = {item["node_key"] for item in previews}
+        missing_preview_keys = sorted(eligible_node_keys - previewed_keys)
+        selected_preview_keys = previewed_keys & eligible_node_keys
+        failed_preview_keys = sorted(
+            item["node_key"] for item in previews if item["status"] != "OK"
+        )
+        full_visual_coverage = (
+            selected_preview_keys == eligible_node_keys
+            and not missing_preview_keys
+            and not failed_preview_keys
+        )
         report = {
             "schema_version": 1,
             "passed": any(item["status"] == "OK" for item in previews),
             "input_psd": str(source_file),
             "source_sha256": source_hash_before,
             "layer_tree_sha256": inspection["layer_tree_sha256"],
+            "inspection_layer_count": inspection["layer_count"],
+            "all_node_count": len(all_node_keys),
+            "eligible_non_background_node_count": len(eligible_node_keys),
+            "previewed_non_background_node_count": len(selected_preview_keys),
+            "full_visual_coverage": full_visual_coverage,
+            "missing_preview_node_keys": missing_preview_keys,
+            "failed_preview_node_keys": failed_preview_keys,
             "preview_dir": str(preview_folder),
             "composite_preview": str(composite_file),
             "contact_sheet": contact_sheet,
@@ -4740,7 +4763,7 @@ def preview_psd_layers(
             "failed_count": sum(1 for item in previews if item["status"] == "ERROR"),
             "skipped_backgrounds": skipped_backgrounds,
             "previews": previews,
-            "source_sha256_unchanged": True,
+            "source_sha256_unchanged": source_hash_after == source_hash_before,
         }
         report_path = preview_folder / "preview_report.json"
         report["report_path"] = str(report_path)
