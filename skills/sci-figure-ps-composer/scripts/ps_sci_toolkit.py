@@ -4604,6 +4604,10 @@ def preview_psd_layers(
     layer_by_key = {layer["node_key"]: layer for layer in inspection["layers"]}
 
     if node_keys is None:
+        skipped_backgrounds = [
+            layer["node_key"] for layer in inspection["layers"]
+            if layer["is_background"]
+        ]
         selected_layers = [
             layer for layer in inspection["layers"]
             if not layer["is_background"]
@@ -4625,9 +4629,10 @@ def preview_psd_layers(
             + ". Select node_keys or raise max_previews."
         )
 
-    skipped_backgrounds = [
-        layer["node_key"] for layer in selected_layers if layer["is_background"]
-    ]
+    if node_keys is not None:
+        skipped_backgrounds = [
+            layer["node_key"] for layer in selected_layers if layer["is_background"]
+        ]
     selected_layers = [
         layer for layer in selected_layers if not layer["is_background"]
     ]
