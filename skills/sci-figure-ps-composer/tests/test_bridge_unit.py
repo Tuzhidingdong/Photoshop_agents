@@ -1535,6 +1535,66 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         self.assertTrue(template["classification_policy"]["do_not_infer_scientific_meaning_from_layer_names_alone"])
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
 
+    def test_classification_template_counts_only_non_background_preview_targets(self):
+        preview_dir = self.root / "template_previews"
+        preview_dir.mkdir()
+        (preview_dir / "composite.png").write_bytes(b"composite")
+        preview_items = []
+        non_background = [
+            layer for layer in self.inspection["layers"]
+            if not layer["is_background"]
+        ]
+        for index, layer in enumerate(non_background, start=1):
+            filename = "layer_" + str(index).zfill(3) + ".png"
+            (preview_dir / filename).write_bytes(b"preview")
+            preview_items.append({
+                "node_key": layer["node_key"],
+                "file_name": filename,
+                "status": "OK",
+            })
+        preview_manifest = {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_dir),
+            "composite_preview": str(preview_dir / "composite.png"),
+            "previews": preview_items,
+        }
+
+        output = self.root / "full_coverage_template.json"
+        result = create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            output,
+            preview_report=preview_manifest,
+        )
+        saved = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["full_visual_coverage"])
+        self.assertEqual(result["preview_success_count"], 4)
+        self.assertEqual(result["preview_failure_count"], 0)
+        self.assertEqual(saved["summary"]["missing_preview_node_keys"], [])
+        background = next(
+            node for node in saved["nodes"] if node["is_background"]
+        )
+        self.assertEqual(
+            background["isolated_preview"]["status"],
+            "SKIPPED_BACKGROUND",
+        )
+
+        partial_manifest = json.loads(json.dumps(preview_manifest))
+        partial_manifest["previews"].pop()
+        partial_output = self.root / "partial_coverage_template.json"
+        partial = create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            partial_output,
+            preview_report=partial_manifest,
+        )
+        self.assertFalse(partial["full_visual_coverage"])
+        self.assertEqual(partial["preview_success_count"], 3)
+        self.assertEqual(partial["preview_failure_count"], 0)
+
     def test_classification_template_rejects_stale_inspection_hash(self):
         stale = json.loads(json.dumps(self.inspection))
         stale["source_sha256"] = "0" * 64
