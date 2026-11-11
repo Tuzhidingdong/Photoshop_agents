@@ -22,6 +22,8 @@ from ps_sci_toolkit import (
     _panel_label_text,
     _physical_scale_width_px,
     unify_fonts,
+    export_figure,
+    _inspect_export_raster,
 )
 
 
@@ -752,6 +754,192 @@ class UnifyFontsUnitTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.exception_type, "TextLayerCountMismatch")
 
+
+
+
+class FakeExportFigureBridge:
+    def __init__(self, *, width=40, height=30, dpi=300.0, mode="RGB"):
+        self.width = width
+        self.height = height
+        self.dpi = dpi
+        self.mode = mode
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        import json
+        import re
+        from PIL import Image
+
+        self.jsx_calls.append(jsx)
+        match = re.search(r"var cfg = (\{.*\});", jsx)
+        if match is None:
+            raise AssertionError("Could not read export config from generated JSX.")
+        config = json.loads(match.group(1))
+        tiff_path = Path(config["tiff_temp_path"])
+        png_path = Path(config["png_temp_path"])
+
+        Image.new("RGB", (self.width, self.height), "white").save(
+            tiff_path,
+            format="TIFF",
+            compression="tiff_lzw",
+            dpi=(self.dpi, self.dpi),
+        )
+        Image.new("RGB", (self.width, self.height), "white").save(
+            png_path,
+            format="PNG",
+            dpi=(self.dpi, self.dpi),
+        )
+
+        return (
+            "SCI_PS_EXPORT_FIGURE\tOK\tFigure_Export\t" +
+            str(self.width) + "\t" + str(self.height) + "\t" +
+            str(self.dpi) + "\t" + self.mode + "\t4\t4\t6\t" +
+            str(self.width) + "\t" + str(self.height) + "\t" +
+            str(self.dpi) + "\tRGB\t" +
+            str(self.width) + "\t" + str(self.height) + "\t" +
+            str(self.dpi) + "\tRGB\t" +
+            str(tiff_path) + "\t" + str(png_path)
+        )
+
+
+class ExportFigureUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Figure_Stage5.psd"
+        self.output_dir = self.root / "exports"
+        self.input_psd.write_bytes(b"editable-source-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_export_figure_creates_editable_psd_lzw_tiff_and_rgb_png(self):
+        from PIL import Image
+
+        source_before = self.input_psd.read_bytes()
+        bridge = FakeExportFigureBridge(width=40, height=30, dpi=300)
+        result = export_figure(
+            self.input_psd,
+            self.output_dir,
+            basename="Figure_1",
+            expected_dpi=300,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["width_px"], 40)
+        self.assertEqual(result["height_px"], 30)
+        self.assertEqual(result["dpi"], 300)
+        self.assertEqual(result["mode"], "RGB")
+        self.assertTrue(result["editable_psd"]["sha256_matches_input"])
+        self.assertTrue(result["input_sha256_unchanged"])
+        self.assertEqual(result["panel_group_count"], 4)
+        self.assertEqual(result["smart_object_count"], 4)
+        self.assertEqual(result["text_layer_count"], 6)
+
+        psd_output = Path(result["editable_psd"]["path"])
+        tiff_output = Path(result["tiff"]["path"])
+        png_output = Path(result["png"]["path"])
+        self.assertEqual(psd_output.read_bytes(), source_before)
+        self.assertEqual(self.input_psd.read_bytes(), source_before)
+        self.assertEqual(result["tiff"]["compression_tag"], 5)
+        self.assertEqual(result["tiff"]["mode"], "RGB")
+        self.assertEqual(result["png"]["format"], "PNG")
+        self.assertEqual(result["png"]["mode"], "RGB")
+        self.assertAlmostEqual(result["png"]["dpi_x"], 300, delta=0.5)
+
+        with Image.open(tiff_output) as image:
+            self.assertEqual(image.tag_v2.get(259), 5)
+        with Image.open(png_output) as image:
+            self.assertEqual(image.mode, "RGB")
+
+        self.assertEqual(len(bridge.jsx_calls), 1)
+        jsx = bridge.jsx_calls[0]
+        self.assertIn("TIFFEncoding.TIFFLZW", jsx)
+        self.assertIn("new TiffSaveOptions()", jsx)
+        self.assertIn("new PNGSaveOptions()", jsx)
+        self.assertIn("sourceDoc.duplicate", jsx)
+        self.assertIn("tiffDoc.flatten()", jsx)
+        self.assertIn("pngDoc.flatten()", jsx)
+        self.assertIn("SaveOptions.DONOTSAVECHANGES", jsx)
+
+    def test_export_figure_rejects_existing_bundle_without_overwrite(self):
+        output_dir = self.output_dir
+        output_dir.mkdir()
+        existing = output_dir / "Figure_Stage5.tif"
+        existing.write_bytes(b"keep")
+        bridge = FakeExportFigureBridge()
+
+        with self.assertRaises(FileExistsError):
+            export_figure(
+                self.input_psd,
+                output_dir,
+                bridge=bridge,
+            )
+
+        self.assertEqual(existing.read_bytes(), b"keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_export_figure_rejects_source_psd_as_bundle_output(self):
+        bridge = FakeExportFigureBridge()
+        with self.assertRaises(ValueError):
+            export_figure(
+                self.input_psd,
+                self.root,
+                basename=self.input_psd.stem,
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_export_figure_rejects_invalid_dpi_and_basename(self):
+        bridge = FakeExportFigureBridge()
+        with self.assertRaises(ValueError):
+            export_figure(
+                self.input_psd,
+                self.output_dir,
+                expected_dpi=450,
+                bridge=bridge,
+            )
+        with self.assertRaises(ValueError):
+            export_figure(
+                self.input_psd,
+                self.output_dir,
+                basename="../bad",
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_export_figure_rejects_wrong_source_dpi(self):
+        bridge = FakeExportFigureBridge(dpi=300)
+        with self.assertRaises(PhotoshopBridgeError) as caught:
+            export_figure(
+                self.input_psd,
+                self.output_dir,
+                expected_dpi=600,
+                bridge=bridge,
+            )
+        self.assertEqual(caught.exception.operation, "export_figure")
+        self.assertEqual(caught.exception.exception_type, "DpiMismatch")
+
+    def test_raster_metadata_inspection_rejects_non_lzw_tiff(self):
+        from PIL import Image
+
+        path = self.root / "uncompressed.tif"
+        Image.new("RGB", (20, 10), "white").save(
+            path,
+            format="TIFF",
+            compression="raw",
+            dpi=(300, 300),
+        )
+        with self.assertRaises(PhotoshopBridgeError) as caught:
+            _inspect_export_raster(
+                path,
+                expected_format="TIFF",
+                expected_size=(20, 10),
+                expected_dpi=300,
+            )
+        self.assertEqual(caught.exception.operation, "export_figure")
+        self.assertIn("compression tag", str(caught.exception))
 
 
 
