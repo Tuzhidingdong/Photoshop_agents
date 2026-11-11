@@ -5843,9 +5843,15 @@ def create_psd_classification_template(
             "fields": metadata_fields,
         })
 
+        is_background = layer.get("is_background") is True
         preview_item = preview_by_key.get(key)
         preview_info = None
-        if preview_item is None:
+        if is_background:
+            preview_info = {
+                "status": "SKIPPED_BACKGROUND",
+                "visual_review_required": False,
+            }
+        elif preview_item is None:
             missing_preview_keys.append(key)
         elif preview_item.get("status") == "OK":
             preview_success_count += 1
@@ -5863,7 +5869,6 @@ def create_psd_classification_template(
                 "visual_review_required": True,
             }
 
-        is_background = layer.get("is_background") is True
         if is_background:
             background_count += 1
             seed = {
