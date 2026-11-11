@@ -45,7 +45,6 @@ python scripts/ps_sci_toolkit.py --action compose-grid `
   --rows 2 --cols 2 --preset double --dpi 300 `
   --margin-cm 0.3 --gap-cm 0.2 --auto-trim `
   --output Figure_1.psd
-~~~
 
 # Add editable labels to a copy of the composed PSD.
 python scripts/ps_sci_toolkit.py --action add-panel-labels `
@@ -171,13 +170,55 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 4. `export_figure`: editable PSD plus RGB LZW TIFF and high-resolution PNG.
 5. `preflight_figure`: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
 
+## add_scale_bar: current implementation
+
+The Python API is:
+
+~~~python
+from ps_sci_toolkit import add_scale_bar
+
+# Explicit display-width mode: the bar is 120 px wide in the final PSD.
+result = add_scale_bar(
+    "Figure_1_labeled.psd",
+    "Figure_1_scalebar.psd",
+    panel_id="a",
+    mode="pixels",
+    bar_width_px=120,
+    label="120 px",
+    color_hex="#000000",
+    outline_hex="#FFFFFF",
+)
+
+# Physical calibration: 10 µm at 0.2 µm per pixel in the source image.
+result = add_scale_bar(
+    "Figure_1_labeled.psd",
+    "Figure_1_scalebar.psd",
+    panel_id="a",
+    mode="physical",
+    physical_length=10,
+    pixel_size=0.2,
+    unit="µm",
+    color_hex="#000000",
+    outline_hex="#FFFFFF",
+)
+~~~
+
+Pixel mode treats `bar_width_px` as pixels in the final Photoshop document. Physical mode treats `pixel_size` as physical units per pixel in the source Smart Object. Photoshop opens the selected embedded Smart Object, reads its current pixel dimensions after any Stage 2 trimming, then calculates:
+
+~~~text
+bar width in final document pixels
+  = (physical_length / pixel_size)
+    × (displayed Smart Object width / Smart Object source width)
+~~~
+
+The scale bar is added only to the selected `Group_Panel_<id>`. Its rectangle and optional contrasting outline are distinct editable raster layers; the caption is a separate editable Photoshop text layer. The group-relative placement is bottom-right with a configurable inset. The input PSD is never saved in place; output must be a different `.psd` path.
 Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
 
 ## Error handling
 
 Every bridge failure must identify:
 
-- operation (connect, status, lock_units, execute_jsx, or compose_grid);
+- operation (connect, status, lock_units, execute_jsx, compose_grid, add_panel_labels, or add_scale_bar);
 - Python exception class, if any;
 - original exception message;
 - JSX preview when applicable;
