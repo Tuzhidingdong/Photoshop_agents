@@ -4875,7 +4875,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -4927,6 +4927,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--inspection-report",
         type=Path,
         help="Optional JSON output path for --action inspect-psd.",
+    )
+    parser.add_argument(
+        "--organize-plan",
+        type=Path,
+        help="Approved structure-only JSON plan for --action apply-organize-plan.",
+    )
+    parser.add_argument(
+        "--confirm-plan",
+        action="store_true",
+        help="Explicitly approve execution of the organizer plan on a temporary PSD copy.",
     )
     parser.add_argument(
         "--label-style",
@@ -5060,6 +5070,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "apply-organize-plan":
+        if args.input_psd is None or args.organize_plan is None or args.output is None:
+            print(
+                "ERROR: --input-psd, --organize-plan, and --output are required "
+                "for --action apply-organize-plan.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.organize_plan.is_file():
+            print("ERROR: organizer plan does not exist: " + str(args.organize_plan), file=sys.stderr)
+            return 2
+        if not args.confirm_plan:
+            print(
+                "ERROR: review the organizer plan and pass --confirm-plan to apply it.",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.action == "preflight-figure":
         if args.input_psd is None:
             print(
@@ -5141,6 +5169,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = inspect_psd(
                 args.input_psd,
                 report_path=args.inspection_report,
+                bridge=bridge,
+            )
+        elif args.action == "apply-organize-plan":
+            result = apply_organize_plan(
+                args.input_psd,
+                args.organize_plan,
+                args.output,
+                approved=args.confirm_plan,
+                overwrite=args.overwrite,
                 bridge=bridge,
             )
         elif args.action == "preflight-figure":
