@@ -276,7 +276,7 @@ The agent must explain the intended changes, including the exact layer paths and
     {
       "action": "move_layer",
       "target": "root/G0/L1",
-      "expected_name": "Panel_A_Annotation",
+      "expected_name": "Layer 5 copy",
       "destination": "panel_a",
       "position": "end"
     },
@@ -306,7 +306,7 @@ Supported operations are:
 - `reorder_layer`: move a node `before` or `after` an existing sibling.
 - `set_visibility`: explicitly set `visible` to true or false.
 
-All `create_group` operations must appear first. The executor then applies renames, moves, reorders, and visibility changes in that order. It rejects stale hashes, unknown node keys, ambiguous or unsafe parent relationships, background/locked/position-locked/clipping-mask moves, and cycles such as moving a group into itself or a descendant.
+All `create_group` operations must appear first. The executor then applies renames, moves, reorders, and visibility changes in that order. Every `expected_name` and `relative_expected_name` refers to the original inspection report, even when the same plan also renames that layer. It rejects stale hashes, unknown node keys, ambiguous or unsafe parent relationships, background/locked/position-locked/clipping-mask moves, and cycles such as moving a group into itself or a descendant.
 
 Apply only after approval:
 
