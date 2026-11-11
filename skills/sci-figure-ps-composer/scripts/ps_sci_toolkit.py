@@ -4115,6 +4115,14 @@ def inspect_psd(
             ).encode("utf-8")
         ).hexdigest()
 
+        if _sha256_file(source_file) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "The source PSD changed before inspection completed.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
         report = {
             "schema_version": 1,
             "passed": True,
@@ -4152,13 +4160,6 @@ def inspect_psd(
                 if temp_report.exists():
                     temp_report.unlink()
 
-        if _sha256_file(source_file) != source_hash_before:
-            raise PhotoshopBridgeError(
-                "inspect_psd",
-                "The source PSD changed before inspection completed.",
-                exception_type="SourceIntegrityError",
-                jsx_preview=_clean_jsx_preview(jsx),
-            )
         return report
     finally:
         try:
