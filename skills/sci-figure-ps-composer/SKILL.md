@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge has passed a real-machine diagnostic on Photoshop 2026. The first `compose_grid` implementation is present, with geometry unit tests passing in CI; its native Photoshop placement/trim/save/reopen flow is awaiting the Windows integration demo. Panel labels, scale bars, font unification, and TIFF/PNG publication export are not implemented yet.
+The implementation is staged. The Photoshop Bridge and `compose_grid` have both passed real-machine verification on Photoshop 2026. The editable panel-label operation is implemented and covered by unit tests; its native Photoshop text-layer/save/reopen flow still requires the Stage 3 Windows integration demo. Scale bars, font unification, TIFF/PNG publication export, and publication preflight remain on the roadmap.
 
 ## Runtime requirements
 
@@ -47,6 +47,13 @@ python scripts/ps_sci_toolkit.py --action compose-grid `
   --output Figure_1.psd
 ~~~
 
+# Add editable labels to a copy of the composed PSD.
+python scripts/ps_sci_toolkit.py --action add-panel-labels \`
+  --input-psd Figure_1.psd --output Figure_1_labeled.psd \`
+  --label-style lowercase --font-postscript Arial-BoldMT \`
+  --font-size-pt 10 --label-inset-cm 0.1
+~~~
+
 The default action is diagnose.
 
 Run the real Photoshop integration demo on Windows with Photoshop open:
@@ -56,6 +63,14 @@ python tests/test_compose_grid_demo.py
 ~~~
 
 The demo generates four synthetic source panels, composes them into a 2×2 PSD, and reopens the saved PSD in Photoshop to check the 2079 px canvas width, 300 DPI, RGB mode, four panel groups, and four embedded Smart Objects. It also checks that the original synthetic source files were not modified. The demo writes its assets and PSD under Documents in a timestamped folder.
+
+After Stage 2 passes, run the Stage 3 text-layer integration test against that PSD:
+
+~~~powershell
+python tests/test_add_panel_labels_demo.py --input-psd path\to\Figure_Grid_Stage2.psd
+~~~
+
+The Stage 3 test saves a separate labeled PSD, reopens it in Photoshop, and verifies one editable Arial Bold text layer per panel group, the selected label style, 10 pt size by default, black text, and non-empty output. It never saves changes back to the input PSD.
 
 ### Bridge behavior
 
@@ -128,7 +143,7 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 
 ## Remaining feature milestones
 
-1. `add_panel_labels`: lowercase, uppercase, and parenthesized labels with editable text layers.
+1. `add_panel_labels`: implemented; unit-tested in CI; awaiting real Photoshop Stage 3 text-layer integration verification.
 2. `add_scale_bar`: explicit-pixel and physically calibrated scale bars, with editable bar and label layers.
 3. `unify_fonts`: recursive text-layer traversal and selective font/size/color normalization.
 4. `export_figure`: editable PSD plus RGB LZW TIFF and high-resolution PNG.
@@ -156,13 +171,15 @@ Run platform-independent unit tests:
 python -m unittest discover -s tests -v
 ~~~
 
-Then run the real Photoshop integration check on the Windows machine:
+Then run the real Photoshop integration checks on the Windows machine:
 
 ~~~powershell
 python scripts/ps_sci_toolkit.py --action diagnose
+python tests/test_compose_grid_demo.py
+python tests/test_add_panel_labels_demo.py --input-psd path\\to\\Figure_Grid_Stage2.psd
 ~~~
 
-A real integration pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Unit tests alone are not proof of Photoshop compatibility.
+A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Stage 2 and Stage 3 integration passes additionally require the respective saved PSDs to be reopened in Photoshop and their native document/layer structures to be inspected. Unit tests alone are not proof of Photoshop compatibility.
 
 ## Confirmed environment baseline
 
