@@ -6737,7 +6737,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "create-psd-classification-template", "validate-psd-classification", "create-organize-plan-draft"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "create-psd-classification-template", "finalize-psd-classification-template", "validate-psd-classification", "create-organize-plan-draft"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -6799,6 +6799,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--classification-report",
         type=Path,
         help="Evidence-grounded semantic classification JSON for Stage 9B.",
+    )
+    parser.add_argument(
+        "--classification-template",
+        type=Path,
+        help="Completed Stage 9B classification work template to finalize.",
     )
     parser.add_argument(
         "--preview-report",
@@ -6983,6 +6988,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("ERROR: preview report does not exist: " + str(args.preview_report), file=sys.stderr)
             return 2
 
+    if args.action == "finalize-psd-classification-template":
+        if args.classification_template is None or args.output is None:
+            print(
+                "ERROR: --classification-template and --output are required "
+                "for --action finalize-psd-classification-template.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.classification_template.is_file():
+            print(
+                "ERROR: classification template does not exist: "
+                + str(args.classification_template),
+                file=sys.stderr,
+            )
+            return 2
+
     if args.action in ("validate-psd-classification", "create-organize-plan-draft"):
         if args.input_psd is None or args.inspection_report is None or args.classification_report is None:
             print(
@@ -7129,6 +7150,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.inspection_report,
                 args.output,
                 preview_report=args.preview_report,
+            )
+        elif args.action == "finalize-psd-classification-template":
+            result = finalize_psd_classification_template(
+                args.classification_template,
+                args.output,
             )
         elif args.action == "validate-psd-classification":
             result = validate_psd_classification(
