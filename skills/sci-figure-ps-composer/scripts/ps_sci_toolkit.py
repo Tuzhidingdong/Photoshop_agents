@@ -4275,6 +4275,52 @@ def _build_preview_psd_layers_jsx(config: Dict[str, Any]) -> str:
         }
         sourceDoc = app.open(inputFile);
 
+        // Create a full-composite preview from a disposable duplicate so the
+        // contact sheet can be interpreted in the context of the actual figure.
+        var compositeDoc = null;
+        try {
+            compositeDoc = sourceDoc.duplicate("SCI_PSD_COMPOSITE_PREVIEW", false);
+            var compositeWidth = compositeDoc.width.as("px");
+            var compositeHeight = compositeDoc.height.as("px");
+            var compositeTargetWidth = Math.min(
+                cfg.thumbnail_width_px,
+                compositeWidth
+            );
+            var compositeTargetHeight = Math.max(
+                1,
+                Math.round(compositeHeight * compositeTargetWidth / compositeWidth)
+            );
+            if (
+                compositeTargetWidth !== compositeWidth ||
+                compositeTargetHeight !== compositeHeight
+            ) {
+                compositeDoc.resizeImage(
+                    UnitValue(compositeTargetWidth, "px"),
+                    UnitValue(compositeTargetHeight, "px"),
+                    compositeDoc.resolution,
+                    ResampleMethod.BICUBICSHARPER
+                );
+            }
+            compositeDoc.flatten();
+            var compositeFile = new File(cfg.output_dir + "/composite.png");
+            if (compositeFile.exists) {
+                throw new Error("Composite preview already exists.");
+            }
+            var compositeOptions = new PNGSaveOptions();
+            compositeOptions.interlaced = false;
+            compositeDoc.saveAs(
+                compositeFile,
+                compositeOptions,
+                true,
+                Extension.LOWERCASE
+            );
+            if (!compositeFile.exists || compositeFile.length <= 0) {
+                throw new Error("Photoshop did not create the composite preview PNG.");
+            }
+        } finally {
+            safeClose(compositeDoc);
+        }
+
         var originalMap = {};
         var originalContainers = {};
         walk(sourceDoc, "root", originalMap, originalContainers);
@@ -4551,6 +4597,7 @@ def preview_psd_layers(
         )
     preview_folder.parent.mkdir(parents=True, exist_ok=True)
     preview_folder.mkdir(parents=False, exist_ok=False)
+    preview_success = False
 
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
     inspection = inspect_psd(source_file, bridge=active_bridge)
@@ -4629,6 +4676,15 @@ def preview_psd_layers(
                 jsx_preview=_clean_jsx_preview(jsx),
             )
 
+        composite_file = preview_folder / "composite.png"
+        if not composite_file.is_file() or composite_file.stat().st_size <= 0:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Photoshop did not create a non-empty composite preview.",
+                exception_type="CompositePreviewExportError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
         previews = _parse_psd_preview_records(protocol[3])
         expected_keys = {item["node_key"] for item in items}
         if {item["node_key"] for item in previews} != expected_keys:
@@ -4671,6 +4727,7 @@ def preview_psd_layers(
             "source_sha256": source_hash_before,
             "layer_tree_sha256": inspection["layer_tree_sha256"],
             "preview_dir": str(preview_folder),
+            "composite_preview": str(composite_file),
             "contact_sheet": contact_sheet,
             "preview_count": len(previews),
             "successful_count": sum(1 for item in previews if item["status"] == "OK"),
@@ -4685,6 +4742,7 @@ def preview_psd_layers(
             json.dumps(report, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        preview_success = True
         return report
     finally:
         try:
@@ -4692,6 +4750,12 @@ def preview_psd_layers(
                 temp_input.unlink()
         except OSError:
             pass
+        if not preview_success:
+            try:
+                if preview_folder.exists():
+                    shutil.rmtree(preview_folder)
+            except OSError:
+                pass
 
 
 
