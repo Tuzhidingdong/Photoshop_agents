@@ -1117,6 +1117,30 @@ class PreflightFigureUnitTests(unittest.TestCase):
         self.assertIn("SCI_PS_PREFLIGHT", bridge.jsx_calls[0])
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-stage5-psd")
 
+    def test_preflight_jsx_restores_global_photoshop_preferences(self):
+        bridge = FakePreflightBridge(_make_preflight_response())
+        preflight_figure(self.input_psd, bridge=bridge)
+
+        jsx = bridge.jsx_calls[0]
+        self.assertIn("var previousRulerUnits = null;", jsx)
+        self.assertIn("var previousTypeUnits = null;", jsx)
+        self.assertIn("previousRulerUnits = app.preferences.rulerUnits;", jsx)
+        self.assertIn("previousTypeUnits = app.preferences.typeUnits;", jsx)
+        self.assertLess(
+            jsx.index("previousRulerUnits = app.preferences.rulerUnits;"),
+            jsx.index("app.preferences.rulerUnits = Units.PIXELS;"),
+        )
+        self.assertLess(
+            jsx.index("previousTypeUnits = app.preferences.typeUnits;"),
+            jsx.index("app.preferences.typeUnits = TypeUnits.POINTS;"),
+        )
+        self.assertIn("if (rulerUnitsCaptured)", jsx)
+        self.assertIn("app.preferences.rulerUnits = previousRulerUnits;", jsx)
+        self.assertIn("if (typeUnitsCaptured)", jsx)
+        self.assertIn("app.preferences.typeUnits = previousTypeUnits;", jsx)
+        self.assertIn("app.displayDialogs = previousDialogs;", jsx)
+
+
     def test_preflight_strict_promotes_publication_warnings_to_failures(self):
         bridge = FakePreflightBridge(_make_preflight_response())
         result = preflight_figure(
