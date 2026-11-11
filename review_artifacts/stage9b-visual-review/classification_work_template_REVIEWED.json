@@ -1,0 +1,1652 @@
+﻿{
+    "schema_version":  1,
+    "template_only":  true,
+    "template_type":  "psd_semantic_classification_work_template",
+    "requires_agent_review":  true,
+    "requires_user_approval_for_organization":  true,
+    "source_psd":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd",
+    "source_sha256":  "ed6651580f6bffb7ba747ac7e003da12d832fd40b05a160fb61d6f2ba066ef1f",
+    "layer_tree_sha256":  "a6fc546177c0a5940a31c92c97021be73c3e0cf5a62416ef1381c8da04df7fc4",
+    "inspection_report":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\inspection_report.json",
+    "preview_report":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\preview_report.json",
+    "summary":  {
+                    "inspection_layer_count":  19,
+                    "background_layer_count":  1,
+                    "non_background_node_count":  18,
+                    "preview_success_count":  18,
+                    "preview_failure_count":  0,
+                    "missing_preview_node_keys":  [
+
+                                                  ],
+                    "full_visual_coverage":  true,
+                    "composite_preview":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\composite.png"
+                },
+    "classification_policy":  {
+                                  "do_not_infer_scientific_meaning_from_layer_names_alone":  true,
+                                  "use_unknown_when_visual_purpose_is_unclear":  true,
+                                  "only_claim_visual_review_after_opening_the_referenced_preview":  true,
+                                  "background_role_is_derived_only_from_photoshop_is_background_flag":  true,
+                                  "do_not_create_organizer_operations_during_classification":  true,
+                                  "role_suggestions_are_hints_not_final_classifications":  true,
+                                  "non_background_role_suggestions_require_preview_review":  true
+                              },
+    "nodes":  [
+                  {
+                      "node_key":  "root/G0",
+                      "parent_key":  "root",
+                      "stack_index":  0,
+                      "depth":  0,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_d",
+                      "name":  "Group_Panel_d",
+                      "typename":  "LayerSet",
+                      "kind":  "LayerSet",
+                      "bounds_px":  [
+                                        1052.0,
+                                        821.0,
+                                        2044.0,
+                                        1531.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_group",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "photoshop_layer_set_type"
+                                                        ],
+                                              "rationale":  "The name follows Group_Panel_\u003cletter\u003e and Photoshop reports a LayerSet; this is a structural naming hint, not visual confirmation of panel contents.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Group_Panel_d"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerSet"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1052.0,
+                                                                       821.0,
+                                                                       2044.0,
+                                                                       1531.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "LayerSet",
+                                                                    "kind":  "LayerSet",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.PASSTHROUGH",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_001.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_001.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G0/L0",
+                      "parent_key":  "root/G0",
+                      "stack_index":  0,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_d/Panel_Label_d",
+                      "name":  "Panel_Label_d",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.TEXT",
+                      "bounds_px":  [
+                                        1065.0,
+                                        847.0,
+                                        1083.0,
+                                        875.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  {
+                                   "contents":  "d",
+                                   "font_postscript":  "ArialMT",
+                                   "size_pt":  9.0,
+                                   "color_hex":  "#000000"
+                               },
+                      "classification_seed":  {
+                                                  "role":  "panel_label",
+                                                  "confidence":  0.99,
+                                                  "rationale":  "The editable text layer displays the panel identifier.",
+                                                  "evidence":  [
+                                                                   {
+                                                                       "type":  "layer_name",
+                                                                       "observation":  "Panel_Label_d"
+                                                                   },
+                                                                   {
+                                                                       "type":  "text_content",
+                                                                       "observation":  "d"
+                                                                   },
+                                                                   {
+                                                                       "type":  "visual_preview",
+                                                                       "preview_node_key":  "root/G0/L0",
+                                                                       "observation":  "实际观察到的图层内容和位置"
+                                                                   }
+                                                               ],
+                                                  "status":  "agent_reviewed"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_label",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "native_text_type",
+                                                            "matching_text_content"
+                                                        ],
+                                              "rationale":  "The editable text layer name and its one-letter text content share the same panel suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Panel_Label_d"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.TEXT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1065.0,
+                                                                       847.0,
+                                                                       1083.0,
+                                                                       875.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "text_content",
+                                                     "observation":  "d"
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.TEXT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  true,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_002.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_002.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G0/L1",
+                      "parent_key":  "root/G0",
+                      "stack_index":  1,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_d/Image_Panel_d",
+                      "name":  "Image_Panel_d",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.SMARTOBJECT",
+                      "bounds_px":  [
+                                        1052.0,
+                                        821.0,
+                                        2044.0,
+                                        1531.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_image",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "smart_object_type",
+                                                            "matching_parent_group"
+                                                        ],
+                                              "rationale":  "The Smart Object name and its immediate parent panel group share the same suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Image_Panel_d"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.SMARTOBJECT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1052.0,
+                                                                       821.0,
+                                                                       2044.0,
+                                                                       1531.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.SMARTOBJECT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_003.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_003.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G1",
+                      "parent_key":  "root",
+                      "stack_index":  1,
+                      "depth":  0,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_c",
+                      "name":  "Group_Panel_c",
+                      "typename":  "LayerSet",
+                      "kind":  "LayerSet",
+                      "bounds_px":  [
+                                        35.0,
+                                        821.0,
+                                        1027.0,
+                                        1531.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_group",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "photoshop_layer_set_type"
+                                                        ],
+                                              "rationale":  "The name follows Group_Panel_\u003cletter\u003e and Photoshop reports a LayerSet; this is a structural naming hint, not visual confirmation of panel contents.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Group_Panel_c"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerSet"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       35.0,
+                                                                       821.0,
+                                                                       1027.0,
+                                                                       1531.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "LayerSet",
+                                                                    "kind":  "LayerSet",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.PASSTHROUGH",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_004.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_004.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G1/L0",
+                      "parent_key":  "root/G1",
+                      "stack_index":  0,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_c/Panel_Label_c",
+                      "name":  "Panel_Label_c",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.TEXT",
+                      "bounds_px":  [
+                                        48.0,
+                                        854.0,
+                                        66.0,
+                                        875.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  {
+                                   "contents":  "c",
+                                   "font_postscript":  "ArialMT",
+                                   "size_pt":  9.0,
+                                   "color_hex":  "#000000"
+                               },
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_label",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "native_text_type",
+                                                            "matching_text_content"
+                                                        ],
+                                              "rationale":  "The editable text layer name and its one-letter text content share the same panel suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Panel_Label_c"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.TEXT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       48.0,
+                                                                       854.0,
+                                                                       66.0,
+                                                                       875.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "text_content",
+                                                     "observation":  "c"
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.TEXT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  true,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_005.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_005.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G1/L1",
+                      "parent_key":  "root/G1",
+                      "stack_index":  1,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_c/Image_Panel_c",
+                      "name":  "Image_Panel_c",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.SMARTOBJECT",
+                      "bounds_px":  [
+                                        35.0,
+                                        821.0,
+                                        1027.0,
+                                        1531.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_image",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "smart_object_type",
+                                                            "matching_parent_group"
+                                                        ],
+                                              "rationale":  "The Smart Object name and its immediate parent panel group share the same suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Image_Panel_c"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.SMARTOBJECT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       35.0,
+                                                                       821.0,
+                                                                       1027.0,
+                                                                       1531.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.SMARTOBJECT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_006.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_006.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G2",
+                      "parent_key":  "root",
+                      "stack_index":  2,
+                      "depth":  0,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_b",
+                      "name":  "Group_Panel_b",
+                      "typename":  "LayerSet",
+                      "kind":  "LayerSet",
+                      "bounds_px":  [
+                                        1052.0,
+                                        52.0,
+                                        2044.0,
+                                        762.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_group",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "photoshop_layer_set_type"
+                                                        ],
+                                              "rationale":  "The name follows Group_Panel_\u003cletter\u003e and Photoshop reports a LayerSet; this is a structural naming hint, not visual confirmation of panel contents.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Group_Panel_b"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerSet"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1052.0,
+                                                                       52.0,
+                                                                       2044.0,
+                                                                       762.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "LayerSet",
+                                                                    "kind":  "LayerSet",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.PASSTHROUGH",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_007.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_007.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G2/G0",
+                      "parent_key":  "root/G2",
+                      "stack_index":  0,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_b/Stage5_Test_Outer",
+                      "name":  "Stage5_Test_Outer",
+                      "typename":  "LayerSet",
+                      "kind":  "LayerSet",
+                      "bounds_px":  [
+                                        1079.0,
+                                        95.0,
+                                        1358.0,
+                                        123.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "test_artifact",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "test_marker_in_layer_name"
+                                                        ],
+                                              "rationale":  "The layer name contains an explicit Test marker; confirm that it is test-only content rather than intentional figure content.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Stage5_Test_Outer"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerSet"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1079.0,
+                                                                       95.0,
+                                                                       1358.0,
+                                                                       123.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "LayerSet",
+                                                                    "kind":  "LayerSet",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.PASSTHROUGH",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_008.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_008.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G2/G0/G0",
+                      "parent_key":  "root/G2/G0",
+                      "stack_index":  0,
+                      "depth":  2,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_b/Stage5_Test_Outer/Stage5_Test_Inner",
+                      "name":  "Stage5_Test_Inner",
+                      "typename":  "LayerSet",
+                      "kind":  "LayerSet",
+                      "bounds_px":  [
+                                        1079.0,
+                                        95.0,
+                                        1358.0,
+                                        123.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "test_artifact",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "test_marker_in_layer_name"
+                                                        ],
+                                              "rationale":  "The layer name contains an explicit Test marker; confirm that it is test-only content rather than intentional figure content.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Stage5_Test_Inner"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerSet"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1079.0,
+                                                                       95.0,
+                                                                       1358.0,
+                                                                       123.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "LayerSet",
+                                                                    "kind":  "LayerSet",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.PASSTHROUGH",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_009.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_009.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G2/G0/G0/L0",
+                      "parent_key":  "root/G2/G0/G0",
+                      "stack_index":  0,
+                      "depth":  3,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_b/Stage5_Test_Outer/Stage5_Test_Inner/Stage5_Nested_Text",
+                      "name":  "Stage5_Nested_Text",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.TEXT",
+                      "bounds_px":  [
+                                        1079.0,
+                                        95.0,
+                                        1358.0,
+                                        123.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  {
+                                   "contents":  "Nested Font Test",
+                                   "font_postscript":  "ArialMT",
+                                   "size_pt":  9.0,
+                                   "color_hex":  "#000000"
+                               },
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "unknown",
+                                              "status":  "no_rule_match",
+                                              "basis":  [
+
+                                                        ],
+                                              "rationale":  "No conservative metadata/name-pattern rule matched; review the preview and retain unknown if unclear.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Stage5_Nested_Text"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.TEXT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1079.0,
+                                                                       95.0,
+                                                                       1358.0,
+                                                                       123.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "text_content",
+                                                     "observation":  "Nested Font Test"
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.TEXT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  true,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_010.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_010.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G2/L1",
+                      "parent_key":  "root/G2",
+                      "stack_index":  1,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_b/Panel_Label_b",
+                      "name":  "Panel_Label_b",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.TEXT",
+                      "bounds_px":  [
+                                        1066.0,
+                                        78.0,
+                                        1084.0,
+                                        106.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  {
+                                   "contents":  "b",
+                                   "font_postscript":  "ArialMT",
+                                   "size_pt":  9.0,
+                                   "color_hex":  "#000000"
+                               },
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_label",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "native_text_type",
+                                                            "matching_text_content"
+                                                        ],
+                                              "rationale":  "The editable text layer name and its one-letter text content share the same panel suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Panel_Label_b"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.TEXT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1066.0,
+                                                                       78.0,
+                                                                       1084.0,
+                                                                       106.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "text_content",
+                                                     "observation":  "b"
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.TEXT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  true,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_011.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_011.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G2/L2",
+                      "parent_key":  "root/G2",
+                      "stack_index":  2,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_b/Image_Panel_b",
+                      "name":  "Image_Panel_b",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.SMARTOBJECT",
+                      "bounds_px":  [
+                                        1052.0,
+                                        52.0,
+                                        2044.0,
+                                        762.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_image",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "smart_object_type",
+                                                            "matching_parent_group"
+                                                        ],
+                                              "rationale":  "The Smart Object name and its immediate parent panel group share the same suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Image_Panel_b"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.SMARTOBJECT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       1052.0,
+                                                                       52.0,
+                                                                       2044.0,
+                                                                       762.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.SMARTOBJECT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_012.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_012.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G3",
+                      "parent_key":  "root",
+                      "stack_index":  3,
+                      "depth":  0,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_a",
+                      "name":  "Group_Panel_a",
+                      "typename":  "LayerSet",
+                      "kind":  "LayerSet",
+                      "bounds_px":  [
+                                        35.0,
+                                        52.0,
+                                        1027.0,
+                                        762.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_group",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "photoshop_layer_set_type"
+                                                        ],
+                                              "rationale":  "The name follows Group_Panel_\u003cletter\u003e and Photoshop reports a LayerSet; this is a structural naming hint, not visual confirmation of panel contents.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Group_Panel_a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerSet"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       35.0,
+                                                                       52.0,
+                                                                       1027.0,
+                                                                       762.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "LayerSet",
+                                                                    "kind":  "LayerSet",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.PASSTHROUGH",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_013.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_013.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G3/L0",
+                      "parent_key":  "root/G3",
+                      "stack_index":  0,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_a/Scale_Label_a",
+                      "name":  "Scale_Label_a",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.TEXT",
+                      "bounds_px":  [
+                                        902.0,
+                                        686.0,
+                                        1000.0,
+                                        722.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  {
+                                   "contents":  "10 碌m",
+                                   "font_postscript":  "ArialMT",
+                                   "size_pt":  9.0,
+                                   "color_hex":  "#000000"
+                               },
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "scale_label",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "native_text_type",
+                                                            "parent_panel_group",
+                                                            "text_content_present"
+                                                        ],
+                                              "rationale":  "The editable text layer follows the Scale_Label pattern, is inside the correspondingly named panel group, and contains text.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Scale_Label_a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.TEXT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       902.0,
+                                                                       686.0,
+                                                                       1000.0,
+                                                                       722.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "text_content",
+                                                     "observation":  "10 碌m"
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.TEXT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  true,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_014.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_014.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G3/L1",
+                      "parent_key":  "root/G3",
+                      "stack_index":  1,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_a/Scale_Bar_a",
+                      "name":  "Scale_Bar_a",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.NORMAL",
+                      "bounds_px":  [
+                                        930.0,
+                                        728.0,
+                                        1002.0,
+                                        737.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "scale_bar",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "photoshop_art_layer_type",
+                                                            "parent_panel_group"
+                                                        ],
+                                              "rationale":  "The layer follows a Scale_Bar naming pattern and is inside the correspondingly named panel group; visual inspection must confirm its appearance.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Scale_Bar_a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.NORMAL"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       930.0,
+                                                                       728.0,
+                                                                       1002.0,
+                                                                       737.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.NORMAL",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_015.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_015.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G3/L2",
+                      "parent_key":  "root/G3",
+                      "stack_index":  2,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_a/Scale_Bar_Outline_a",
+                      "name":  "Scale_Bar_Outline_a",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.NORMAL",
+                      "bounds_px":  [
+                                        928.0,
+                                        725.0,
+                                        1004.0,
+                                        739.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "scale_bar",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "photoshop_art_layer_type",
+                                                            "parent_panel_group"
+                                                        ],
+                                              "rationale":  "The layer follows a Scale_Bar naming pattern and is inside the correspondingly named panel group; visual inspection must confirm its appearance.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Scale_Bar_Outline_a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.NORMAL"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       928.0,
+                                                                       725.0,
+                                                                       1004.0,
+                                                                       739.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.NORMAL",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_016.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_016.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G3/L3",
+                      "parent_key":  "root/G3",
+                      "stack_index":  3,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_a/Panel_Label_a",
+                      "name":  "Panel_Label_a",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.TEXT",
+                      "bounds_px":  [
+                                        48.0,
+                                        85.0,
+                                        67.0,
+                                        106.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  {
+                                   "contents":  "a",
+                                   "font_postscript":  "ArialMT",
+                                   "size_pt":  9.0,
+                                   "color_hex":  "#000000"
+                               },
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_label",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "native_text_type",
+                                                            "matching_text_content"
+                                                        ],
+                                              "rationale":  "The editable text layer name and its one-letter text content share the same panel suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Panel_Label_a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.TEXT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       48.0,
+                                                                       85.0,
+                                                                       67.0,
+                                                                       106.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "text_content",
+                                                     "observation":  "a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.TEXT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  true,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_017.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_017.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/G3/L4",
+                      "parent_key":  "root/G3",
+                      "stack_index":  4,
+                      "depth":  1,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/Group_Panel_a/Image_Panel_a",
+                      "name":  "Image_Panel_a",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.SMARTOBJECT",
+                      "bounds_px":  [
+                                        35.0,
+                                        52.0,
+                                        1027.0,
+                                        762.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  false,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "unknown",
+                                                  "confidence":  null,
+                                                  "rationale":  null,
+                                                  "evidence":  [
+
+                                                               ],
+                                                  "status":  "pending_agent_review"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "panel_image",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "layer_name_pattern",
+                                                            "smart_object_type",
+                                                            "matching_parent_group"
+                                                        ],
+                                              "rationale":  "The Smart Object name and its immediate parent panel group share the same suffix.",
+                                              "requires_visual_confirmation":  true,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "Image_Panel_a"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.SMARTOBJECT"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       35.0,
+                                                                       52.0,
+                                                                       1027.0,
+                                                                       762.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.SMARTOBJECT",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  false,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  false,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "OK",
+                                               "file_name":  "layer_018.png",
+                                               "path":  "C:\\Users\\Administrator\\Documents\\sci_figure_ps_composer_demo\\20261111_093736\\Figure_Stage9_Audit_bb4df13c86ba446a90e0d1463f3cee26\\layer_018.png",
+                                               "visual_review_required":  true
+                                           }
+                  },
+                  {
+                      "node_key":  "root/L4",
+                      "parent_key":  "root",
+                      "stack_index":  4,
+                      "depth":  0,
+                      "path":  "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified.psd/鑳屾櫙",
+                      "name":  "鑳屾櫙",
+                      "typename":  "ArtLayer",
+                      "kind":  "LayerKind.NORMAL",
+                      "bounds_px":  [
+                                        0.0,
+                                        0.0,
+                                        2079.0,
+                                        1583.0
+                                    ],
+                      "visible":  true,
+                      "is_background":  true,
+                      "text":  null,
+                      "classification_seed":  {
+                                                  "role":  "background",
+                                                  "confidence":  1.0,
+                                                  "rationale":  "Photoshop explicitly identifies this node as the document Background layer; this is a structural classification, not an inference about figure content.",
+                                                  "evidence":  [
+                                                                   {
+                                                                       "type":  "layer_metadata",
+                                                                       "observation":  "Photoshop marks this node as the document Background layer.",
+                                                                       "fields":  {
+                                                                                      "is_background":  true
+                                                                                  }
+                                                                   }
+                                                               ],
+                                                  "status":  "metadata_confirmed"
+                                              },
+                      "role_suggestion":  {
+                                              "candidate_role":  "background",
+                                              "status":  "candidate_only",
+                                              "basis":  [
+                                                            "photoshop_is_background_flag"
+                                                        ],
+                                              "rationale":  "Photoshop explicitly marks this node as the document Background layer.",
+                                              "requires_visual_confirmation":  false,
+                                              "is_final_classification":  false
+                                          },
+                      "available_evidence":  [
+                                                 {
+                                                     "type":  "layer_name",
+                                                     "observation":  "鑳屾櫙"
+                                                 },
+                                                 {
+                                                     "type":  "layer_type",
+                                                     "observation":  "LayerKind.NORMAL"
+                                                 },
+                                                 {
+                                                     "type":  "geometry",
+                                                     "observation":  "Exact Photoshop layer bounds in document pixels.",
+                                                     "bounds_px":  [
+                                                                       0.0,
+                                                                       0.0,
+                                                                       2079.0,
+                                                                       1583.0
+                                                                   ]
+                                                 },
+                                                 {
+                                                     "type":  "layer_metadata",
+                                                     "observation":  "Exact Photoshop layer properties copied from the read-only inspection.",
+                                                     "fields":  {
+                                                                    "typename":  "ArtLayer",
+                                                                    "kind":  "LayerKind.NORMAL",
+                                                                    "visible":  true,
+                                                                    "opacity":  100.0,
+                                                                    "blend_mode":  "BlendMode.NORMAL",
+                                                                    "is_background":  true,
+                                                                    "all_locked":  false,
+                                                                    "position_locked":  true,
+                                                                    "pixels_locked":  false,
+                                                                    "clipped_to_below":  false
+                                                                }
+                                                 }
+                                             ],
+                      "isolated_preview":  {
+                                               "status":  "SKIPPED_BACKGROUND",
+                                               "visual_review_required":  false
+                                           }
+                  }
+              ]
+}
