@@ -31,6 +31,9 @@ from ps_sci_toolkit import (
     apply_organize_plan,
     _parse_organize_verify_records,
     _build_apply_organize_plan_jsx,
+    _build_preview_psd_layers_jsx,
+    _parse_psd_preview_records,
+    preview_psd_layers,
 )
 
 
@@ -1198,6 +1201,150 @@ class InspectPsdUnitTests(unittest.TestCase):
         bridge = FakeInspectBridge(response)
         with self.assertRaises(ValueError):
             inspect_psd(self.input_psd, bridge=bridge)
+
+
+
+
+class FakePreviewBridge:
+    def __init__(self, inspection_response=None):
+        self.inspection_response = inspection_response or _make_inspection_response()
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        if "SCI_PS_INSPECT_PSD" in jsx:
+            return self.inspection_response
+
+        import re
+        match = re.search(r"var cfg = (\{.*\});", jsx)
+        if not match:
+            raise AssertionError("Preview JSX configuration was not embedded.")
+        config = json.loads(match.group(1))
+        from PIL import Image
+
+        records = []
+        for item in config["items"]:
+            preview_path = Path(config["output_dir"]) / item["file_name"]
+            Image.new("RGBA", (64, 48), (40, 90, 140, 220)).save(preview_path, format="PNG")
+            records.append(_encode_inspection_record([
+                "PREVIEW", item["node_key"], item["file_name"], "OK", 64, 48, ""
+            ]))
+        return (
+            "SCI_PS_PREVIEW_PSD\tOK\t"
+            + str(len(config["items"]))
+            + "\t"
+            + "\n".join(records)
+        )
+
+
+class PreviewPsdLayersTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_preview_psd_layers_creates_contact_sheet_and_manifest(self):
+        bridge = FakePreviewBridge()
+        output_dir = self.root / "layer_previews"
+
+        result = preview_psd_layers(
+            self.input_psd,
+            output_dir,
+            bridge=bridge,
+            thumbnail_width_px=256,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["preview_count"], 4)
+        self.assertEqual(result["successful_count"], 4)
+        self.assertEqual(result["failed_count"], 0)
+        self.assertEqual(result["skipped_backgrounds"], ["root/L3"])
+        self.assertTrue(Path(result["contact_sheet"]["path"]).is_file())
+        self.assertTrue(Path(result["report_path"]).is_file())
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+        self.assertTrue(result["source_sha256_unchanged"])
+        self.assertIn("restoreGroupChildren", bridge.jsx_calls[-1])
+        self.assertIn("previewDoc.duplicate", bridge.jsx_calls[-1])
+        self.assertIn("ResampleMethod.BICUBICSHARPER", bridge.jsx_calls[-1])
+        self.assertIn("SaveOptions.DONOTSAVECHANGES", bridge.jsx_calls[-1])
+
+    def test_preview_psd_layers_can_select_specific_node_keys(self):
+        bridge = FakePreviewBridge()
+        output_dir = self.root / "selected_previews"
+
+        result = preview_psd_layers(
+            self.input_psd,
+            output_dir,
+            node_keys=["root/G1/L0", "root/L2"],
+            bridge=bridge,
+        )
+
+        self.assertEqual(result["preview_count"], 2)
+        self.assertEqual(
+            [item["node_key"] for item in result["previews"]],
+            ["root/G1/L0", "root/L2"],
+        )
+
+    def test_preview_psd_layers_rejects_unknown_or_duplicate_node_keys(self):
+        for keys in (["root/not-found"], ["root/L2", "root/L2"]):
+            bridge = FakePreviewBridge()
+            output_dir = self.root / ("bad_" + str(len(list(self.root.iterdir()))))
+            with self.assertRaises(ValueError):
+                preview_psd_layers(
+                    self.input_psd,
+                    output_dir,
+                    node_keys=keys,
+                    bridge=bridge,
+                )
+
+    def test_preview_psd_layers_rejects_existing_output_directory(self):
+        output_dir = self.root / "existing"
+        output_dir.mkdir()
+        bridge = FakePreviewBridge()
+        with self.assertRaises(FileExistsError):
+            preview_psd_layers(self.input_psd, output_dir, bridge=bridge)
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_preview_jsx_contains_isolation_and_safe_duplicate_workflow(self):
+        jsx = _build_preview_psd_layers_jsx({
+            "input_path": "C:/Temp/source.psd",
+            "output_dir": "C:/Temp/previews",
+            "thumbnail_width_px": 512,
+            "items": [
+                {
+                    "sequence": 1,
+                    "node_key": "root/G0/L1",
+                    "stack_index": 1,
+                    "file_name": "layer_001.png",
+                }
+            ],
+        })
+        self.assertIn("hideAll(previewDoc)", jsx)
+        self.assertIn("setAncestorsVisible(item, previewMap)", jsx)
+        self.assertIn("restoreGroupChildren(sourceLayer, previewLayer)", jsx)
+        self.assertIn("Boolean(sourceLayer.grouped)", jsx)
+        self.assertIn("PNGSaveOptions", jsx)
+        self.assertIn("previewDoc.resizeImage", jsx)
+        self.assertIn("previousRulerUnits", jsx)
+        self.assertIn("previousTypeUnits", jsx)
+
+    def test_preview_record_parser_rejects_duplicate_or_unknown_status(self):
+        good = _encode_inspection_record([
+            "PREVIEW", "root/L0", "layer_001.png", "OK", 64, 48, ""
+        ])
+        duplicate = good + "\n" + good
+        with self.assertRaisesRegex(ValueError, "Duplicate PSD preview node key"):
+            _parse_psd_preview_records(duplicate)
+
+        bad_status = _encode_inspection_record([
+            "PREVIEW", "root/L0", "layer_001.png", "MAYBE", 64, 48, ""
+        ])
+        with self.assertRaisesRegex(ValueError, "Unknown PSD preview status"):
+            _parse_psd_preview_records(bad_status)
 
 
 
