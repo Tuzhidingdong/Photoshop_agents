@@ -3259,6 +3259,47 @@ def preflight_figure(
         expected="RGB",
     )
 
+    add_check(
+        "canvas.color_profile",
+        "INFO" if document["color_profile"] else "WARN",
+        "Embedded color profile: " + document["color_profile"] if document["color_profile"] else "Photoshop did not report an embedded RGB color profile.",
+        actual=document["color_profile"] or None,
+        expected="journal/publisher color profile as required",
+    )
+
+    canvas_width = document["width_px"]
+    canvas_height = document["height_px"]
+    for panel in panels:
+        image_fits_canvas = (
+            panel["image_right"] <= canvas_width + 0.5 and
+            panel["image_bottom"] <= canvas_height + 0.5 and
+            panel["image_left"] >= -0.5 and
+            panel["image_top"] >= -0.5
+        )
+        add_check(
+            "panel_" + panel["panel_id"] + ".canvas_bounds",
+            "PASS" if image_fits_canvas else "FAIL",
+            "Panel image is contained by the canvas." if image_fits_canvas else "Panel image extends beyond the figure canvas.",
+            actual=[
+                panel["image_left"], panel["image_top"],
+                panel["image_right"], panel["image_bottom"],
+            ],
+            expected=[0, 0, canvas_width, canvas_height],
+        )
+
+    for panel_index, panel in enumerate(panels):
+        for other in panels[panel_index + 1:]:
+            overlap_width = min(panel["image_right"], other["image_right"]) - max(panel["image_left"], other["image_left"])
+            overlap_height = min(panel["image_bottom"], other["image_bottom"]) - max(panel["image_top"], other["image_top"])
+            if overlap_width > 0.5 and overlap_height > 0.5:
+                add_check(
+                    "panel_overlap." + panel["panel_id"] + "_" + other["panel_id"],
+                    "WARN",
+                    "Panel image bounds overlap; verify that the overlap is intentional.",
+                    actual={"overlap_width_px": overlap_width, "overlap_height_px": overlap_height},
+                    expected="no unintended panel-image overlap",
+                )
+
     if expected_width_cm is not None:
         width_ok = abs(width_cm - float(expected_width_cm)) <= float(width_tolerance_cm)
         add_check(
@@ -3536,6 +3577,22 @@ def preflight_figure(
     if check_text_styles:
         for text_layer in text_layers:
             name = text_layer["name"]
+            text_inside_canvas = (
+                text_layer["left"] >= -0.5 and
+                text_layer["top"] >= -0.5 and
+                text_layer["right"] <= document["width_px"] + 0.5 and
+                text_layer["bottom"] <= document["height_px"] + 0.5
+            )
+            add_check(
+                "text_bounds." + text_layer["path"],
+                "PASS" if text_inside_canvas else "WARN",
+                "Text layer is within the canvas." if text_inside_canvas else "Text layer extends beyond the canvas.",
+                actual=[
+                    text_layer["left"], text_layer["top"],
+                    text_layer["right"], text_layer["bottom"],
+                ],
+                expected=[0, 0, document["width_px"], document["height_px"]],
+            )
             if name.startswith("Panel_Label_"):
                 continue
             if text_layer["color_hex"].upper() != "#000000":
