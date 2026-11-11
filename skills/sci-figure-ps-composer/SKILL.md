@@ -9,15 +9,16 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The current repository milestone implements the Photoshop Bridge only: COM connection, JSX execution, unit locking, status inspection, and structured diagnostics. Do not claim that grid composition, panel labels, scale bars, font unification, or publication export are implemented until their functions and real-Photoshop tests have been added.
+The implementation is staged. The Photoshop Bridge is implemented and has passed a real-machine diagnostic on Photoshop 2026. The first `compose_grid` implementation is now present: canvas geometry, raster input inspection, row-major grid layout, embedded Smart Objects, panel groups, optional native trim, and PSD save. This composition feature still requires a real Photoshop end-to-end test before it can be described as fully validated. Panel labels, scale bars, font unification, and TIFF/PNG publication export are not implemented yet.
 
 ## Runtime requirements
 
 - Windows desktop session.
 - Adobe Photoshop installed. The Photoshop process should be started before running the bridge.
-- Python 3.9 or later; the validated user environment is Python 3.13.9.
+- Python 3.10 or later; the validated user environment is Python 3.13.9.
 - photoshop-python-api 0.24.2 or a compatible 0.24.x release.
 - COM support through the package's comtypes dependency.
+- Pillow 10 or later, used only to read source raster dimensions; it does not re-encode or modify original images.
 
 Install the dependency into the exact Python interpreter that will run the skill:
 
