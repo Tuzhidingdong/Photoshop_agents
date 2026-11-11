@@ -18,7 +18,9 @@ from ps_sci_toolkit import (
     compose_grid,
     _detect_trim_steps,
     add_panel_labels,
+    add_scale_bar,
     _panel_label_text,
+    _physical_scale_width_px,
 )
 
 
@@ -426,6 +428,164 @@ class PanelLabelUnitTests(unittest.TestCase):
                 self.input_psd,
                 self.output_psd,
                 color_hex="black",
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+
+
+class FakeScaleBarBridge:
+    def __init__(self, output_path, response):
+        self.output_path = Path(output_path)
+        self.response = response
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        self.output_path.write_bytes(b"mock-scale-bar-psd")
+        return self.response
+
+
+class ScaleBarUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Figure_Labeled.psd"
+        self.output_psd = self.root / "Figure_ScaleBar.psd"
+        self.input_psd.write_bytes(b"source-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _bridge(self, output=None, mode="pixels", width="120"):
+        output = Path(output or self.output_psd)
+        response = (
+            "SCI_PS_SCALE_BAR\tOK\tFigure_ScaleBar\ta\t" + mode + "\t" +
+            width + "\t100 px\t1000\t800\t0.75\ttrue\t" + str(output)
+        )
+        return FakeScaleBarBridge(output, response)
+
+    def test_physical_scale_width_accounts_for_smart_object_transform(self):
+        # 10 µm / 0.2 µm per source pixel = 50 source pixels.
+        # A 1000 px Smart Object displayed at 1500 px gives a 1.5x transform.
+        self.assertAlmostEqual(
+            _physical_scale_width_px(10, 0.2, 1500, 1000),
+            75.0,
+        )
+
+    def test_physical_scale_width_rejects_invalid_dimensions(self):
+        with self.assertRaises(ValueError):
+            _physical_scale_width_px(10, 0.2, 1500, 0)
+
+    def test_add_scale_bar_pixel_mode_builds_separate_editable_layers(self):
+        source_before = self.input_psd.read_bytes()
+        bridge = self._bridge(mode="pixels", width="120")
+        result = add_scale_bar(
+            self.input_psd,
+            self.output_psd,
+            panel_id="a",
+            mode="pixels",
+            bar_width_px=120,
+            outline_hex="#FFFFFF",
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["panel_id"], "a")
+        self.assertEqual(result["mode"], "pixels")
+        self.assertEqual(result["bar_width_px"], 120)
+        self.assertEqual(result["label"], "100 px")
+        self.assertTrue(result["outline"])
+        self.assertEqual(self.input_psd.read_bytes(), source_before)
+        self.assertEqual(self.output_psd.read_bytes(), b"mock-scale-bar-psd")
+
+        jsx = bridge.jsx_calls[0]
+        self.assertIn("Scale_Bar_Outline_", jsx)
+        self.assertIn("Scale_Bar_", jsx)
+        self.assertIn("Scale_Label_", jsx)
+        self.assertIn("LayerKind.TEXT", jsx)
+        self.assertIn("parentDoc.selection.fill", jsx)
+        self.assertIn("Justification.RIGHT", jsx)
+        self.assertIn("placedLayerEditContents", jsx)
+        self.assertIn("displayedImageWidth / sourceWidthPx", jsx)
+        self.assertIn("doc.close(SaveOptions.DONOTSAVECHANGES)", jsx)
+
+    def test_add_scale_bar_physical_mode_uses_calibrated_label(self):
+        bridge = self._bridge(mode="physical", width="75")
+        result = add_scale_bar(
+            self.input_psd,
+            self.output_psd,
+            mode="physical",
+            physical_length=10,
+            pixel_size=0.2,
+            unit="µm",
+            color_hex="#FFFFFF",
+            outline_hex="#000000",
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["mode"], "physical")
+        self.assertEqual(result["label"], "100 px")
+        self.assertEqual(result["smart_object_width_px"], 1000)
+        self.assertEqual(result["smart_object_height_px"], 800)
+        self.assertEqual(result["displayed_pixels_per_source_pixel"], 0.75)
+        self.assertTrue(result["outline"])
+        self.assertIn('"label":"10 \\\\u00b5m"', bridge.jsx_calls[0])
+
+    def test_add_scale_bar_rejects_source_overwrite(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            add_scale_bar(
+                self.input_psd,
+                self.input_psd,
+                bar_width_px=100,
+                overwrite=True,
+                bridge=bridge,
+            )
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_add_scale_bar_rejects_existing_output_without_overwrite(self):
+        self.output_psd.write_bytes(b"keep")
+        bridge = self._bridge()
+        with self.assertRaises(FileExistsError):
+            add_scale_bar(
+                self.input_psd,
+                self.output_psd,
+                bar_width_px=100,
+                bridge=bridge,
+            )
+        self.assertEqual(self.output_psd.read_bytes(), b"keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_add_scale_bar_validates_mode_calibration_and_contrast(self):
+        bridge = self._bridge()
+        with self.assertRaises(ValueError):
+            add_scale_bar(self.input_psd, self.output_psd, mode="pixels", bridge=bridge)
+        with self.assertRaises(ValueError):
+            add_scale_bar(
+                self.input_psd,
+                self.output_psd,
+                mode="physical",
+                physical_length=10,
+                pixel_size=0.2,
+                bridge=bridge,
+            )
+        with self.assertRaises(ValueError):
+            add_scale_bar(
+                self.input_psd,
+                self.output_psd,
+                bar_width_px=100,
+                color_hex="#FF0000",
+                bridge=bridge,
+            )
+        with self.assertRaises(ValueError):
+            add_scale_bar(
+                self.input_psd,
+                self.output_psd,
+                bar_width_px=100,
+                color_hex="#000000",
+                outline_hex="#000000",
                 bridge=bridge,
             )
         self.assertEqual(bridge.jsx_calls, [])
