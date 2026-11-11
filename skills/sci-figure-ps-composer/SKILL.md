@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs; Stage 8 real-Photoshop verification is pending.
+The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs. Both Stage 8A inspection and Stage 8B Smart Object reparenting passed real Photoshop 2026 (27.9.1) integration tests; the source PSD hash remained unchanged.
 
 ## Runtime requirements
 
@@ -231,8 +231,9 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 
 1. Photoshop Bridge, `compose_grid`, `add_panel_labels`, `add_scale_bar`, `unify_fonts`, `export_figure`, and `preflight_figure`: implemented; Stages 1–7 passed real Photoshop verification on the user's Photoshop 2026 installation.
 2. Stage 8 execution modes: `quiet` and `interactive` are implemented; unit coverage is included. `quiet` is not true headless execution.
-3. Stage 8A `inspect_psd`: implemented; returns a read-only, mixed-order layer tree and source integrity hashes. Real Photoshop integration verification is pending.
-4. Stage 8B `apply_organize_plan`: implemented as an explicitly approved, structure-only plan executor operating on a temporary byte-identical PSD copy and saving to a new PSD. Unit coverage and real Photoshop integration verification are pending.
+3. Stage 8A `inspect_psd`: implemented; returns a read-only, mixed-order layer tree and source integrity hashes. Real Photoshop 2026 integration passed against a 19-layer research figure (6 groups, 6 text layers, 4 Smart Objects).
+4. Stage 8B `apply_organize_plan`: implemented as an explicitly approved, structure-only plan executor operating on a temporary byte-identical PSD copy and saving to a new PSD. Real Photoshop 2026 integration passed by moving an embedded Smart Object into a new group, reopening the output, and verifying 20 layers, unchanged text/Smart Object counts, and unchanged source SHA-256.
+5. Stage 8C visual layer previews and content-grounded organization proposals: next design/implementation milestone; not yet implemented.
 
 ## Existing PSD inspection and organization
 
@@ -500,6 +501,8 @@ python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5
 python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 python tests/test_inspect_psd_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 python tests/test_apply_organize_plan_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
+
+Both Stage 8A and Stage 8B integration demos passed on Photoshop 2026 (27.9.1). The inspected source PSD contained 19 layers, 6 groups, 6 text layers, and 4 Smart Objects. Stage 8B moved the embedded `Image_Panel_a` Smart Object into a new test group on a separate PSD copy; the output reopened with 20 layers and preserved the original 6 text layers and 4 Smart Objects. The original PSD SHA-256 remained unchanged.
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Each staged integration pass requires the generated PSD or export bundle to be reopened in Photoshop and its native document/layer structure or export metadata to be inspected. The Stage 7 integration pass additionally verifies that the inspected source PSD remains unchanged. Unit tests alone are not proof of Photoshop compatibility.
