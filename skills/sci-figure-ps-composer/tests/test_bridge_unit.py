@@ -26,6 +26,9 @@ from ps_sci_toolkit import (
     _inspect_export_raster,
     preflight_figure,
     inspect_psd,
+    _validate_organize_plan,
+    apply_organize_plan,
+    _parse_organize_verify_records,
 )
 
 
@@ -1180,6 +1183,155 @@ class InspectPsdUnitTests(unittest.TestCase):
         bridge = FakeInspectBridge(response)
         with self.assertRaises(ValueError):
             inspect_psd(self.input_psd, bridge=bridge)
+
+
+
+class OrganizePlanValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+        self.inspection = inspect_psd(
+            self.input_psd,
+            bridge=FakeInspectBridge(_make_inspection_response()),
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def plan(self, operations):
+        return {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "operations": operations,
+        }
+
+    def test_valid_plan_can_create_group_rename_move_reorder_and_set_visibility(self):
+        plan = self.plan([
+            {"action": "create_group", "key": "panel_a", "name": "Panel A", "parent": "root"},
+            {
+                "action": "rename_layer",
+                "target": "root/G1",
+                "expected_name": "Old Group",
+                "new_name": "Legacy Source Group",
+            },
+            {
+                "action": "move_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "destination": "panel_a",
+                "position": "end",
+            },
+            {
+                "action": "reorder_layer",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "relative_to": "root/L0",
+                "relative_expected_name": "Background",
+                "position": "before",
+            },
+            {
+                "action": "set_visibility",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "visible": False,
+            },
+        ])
+
+        normalized = _validate_organize_plan(plan, self.inspection)
+
+        self.assertEqual(len(normalized["operations"]), 5)
+        self.assertIn("panel_a", normalized["created_groups"])
+        identities = {item["identity"] for item in normalized["verify_refs"]}
+        self.assertIn("group:panel_a", identities)
+        self.assertIn("source:root/G1/L0", identities)
+
+    def test_plan_rejects_stale_source_hash_or_layer_tree(self):
+        stale_hash = self.plan([
+            {"action": "rename_layer", "target": "root/G1", "expected_name": "Old Group", "new_name": "New"}
+        ])
+        stale_hash["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            _validate_organize_plan(stale_hash, self.inspection)
+
+        stale_tree = self.plan([
+            {"action": "rename_layer", "target": "root/G1", "expected_name": "Old Group", "new_name": "New"}
+        ])
+        stale_tree["layer_tree_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "layer_tree_sha256"):
+            _validate_organize_plan(stale_tree, self.inspection)
+
+    def test_plan_rejects_unapproved_or_destructive_operation_types(self):
+        with self.assertRaises(PermissionError):
+            apply_organize_plan(
+                self.input_psd,
+                self.plan([{"action": "delete_layer", "target": "root/G1"}]),
+                self.root / "out.psd",
+                approved=False,
+                bridge=FakeInspectBridge(_make_inspection_response()),
+            )
+
+        with self.assertRaisesRegex(ValueError, "Unsupported organizer action"):
+            _validate_organize_plan(
+                self.plan([{"action": "delete_layer", "target": "root/G1"}]),
+                self.inspection,
+            )
+
+    def test_plan_rejects_moving_background_locked_or_clipping_layers(self):
+        plan = self.plan([
+            {"action": "move_layer", "target": "root/L0", "expected_name": "Background", "destination": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "background"):
+            _validate_organize_plan(plan, self.inspection)
+
+        clipped = json.loads(json.dumps(self.inspection))
+        layer = next(item for item in clipped["layers"] if item["node_key"] == "root/L2")
+        layer["clipped_to_below"] = True
+        plan = self.plan([
+            {"action": "move_layer", "target": "root/L2", "expected_name": "Micrograph", "destination": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "Clipping-mask"):
+            _validate_organize_plan(plan, clipped)
+
+    def test_plan_rejects_self_or_descendant_group_moves_and_sibling_mismatch(self):
+        self_move = self.plan([
+            {"action": "move_layer", "target": "root/G1", "expected_name": "Old Group", "destination": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "itself or one of its descendants"):
+            _validate_organize_plan(self_move, self.inspection)
+
+        bad_reorder = self.plan([
+            {
+                "action": "reorder_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "relative_to": "root/L2",
+                "relative_expected_name": "Micrograph",
+                "position": "before",
+            }
+        ])
+        with self.assertRaisesRegex(ValueError, "siblings"):
+            _validate_organize_plan(bad_reorder, self.inspection)
+
+    def test_create_groups_must_come_before_layer_operations(self):
+        plan = self.plan([
+            {"action": "rename_layer", "target": "root/G1", "expected_name": "Old Group", "new_name": "Renamed"},
+            {"action": "create_group", "key": "new_group", "name": "New Group", "parent": "root"},
+        ])
+        with self.assertRaisesRegex(ValueError, "must appear before"):
+            _validate_organize_plan(plan, self.inspection)
+
+    def test_organizer_verification_records_are_decoded(self):
+        encoded = _encode_inspection_record([
+            "VERIFY", "source:root/L0", "root/G1/L0", "root/G1", 0,
+            "ArtLayer", "Caption", True,
+        ])
+        verified = _parse_organize_verify_records(encoded)
+        self.assertEqual(verified["source:root/L0"]["name"], "Caption")
+        self.assertEqual(verified["source:root/L0"]["parent_key"], "root/G1")
+
 
 
 class PreflightFigureUnitTests(unittest.TestCase):
