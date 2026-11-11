@@ -4216,6 +4216,15 @@ def _validate_organize_plan(
         layer["node_key"]: layer for layer in inspection.get("layers", [])
     }
 
+    def has_locked_ancestor(key: str) -> bool:
+        current = source_layers[key]["parent_key"]
+        while current != "root":
+            parent_layer = source_layers[current]
+            if parent_layer["all_locked"] or parent_layer["position_locked"]:
+                return True
+            current = parent_layer["parent_key"]
+        return False
+
     def participates_in_clipping_chain(key: str) -> bool:
         layer = source_layers[key]
         if layer["clipped_to_below"]:
@@ -4266,8 +4275,8 @@ def _validate_organize_plan(
         layer = require_layer(key, field)
         if layer["typename"] != "LayerSet":
             raise ValueError(field + " must reference root, a LayerSet, or an earlier created group.")
-        if layer["all_locked"] or layer["position_locked"]:
-            raise ValueError(field + " cannot target a fully or position-locked LayerSet.")
+        if layer["all_locked"] or layer["position_locked"] or has_locked_ancestor(key):
+            raise ValueError(field + " cannot target a fully or position-locked LayerSet or ancestor.")
         return key
 
     def destination_is_inside_target(destination: str, target_key: str) -> bool:
@@ -4332,8 +4341,11 @@ def _validate_organize_plan(
                 layer = require_layer(target, "move_layer.target")
                 if target in moved or target in reordered:
                     raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
-                if layer["is_background"] or layer["all_locked"] or layer["position_locked"]:
-                    raise ValueError("Locked/background layer cannot be moved: " + target)
+                if (
+                    layer["is_background"] or layer["all_locked"]
+                    or layer["position_locked"] or has_locked_ancestor(target)
+                ):
+                    raise ValueError("Locked/background layer or a child of a locked group cannot be moved: " + target)
                 if participates_in_clipping_chain(target):
                     raise ValueError("Layers participating in clipping-mask chains cannot be moved in organizer v1: " + target)
                 if operation.get("expected_name") != layer["name"]:
@@ -4368,8 +4380,11 @@ def _validate_organize_plan(
                     raise ValueError("reorder_layer.target and relative_to must differ.")
                 if target in moved or target in reordered:
                     raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
-                if layer["is_background"] or layer["all_locked"] or layer["position_locked"]:
-                    raise ValueError("Locked/background layer cannot be reordered: " + target)
+                if (
+                    layer["is_background"] or layer["all_locked"]
+                    or layer["position_locked"] or has_locked_ancestor(target)
+                ):
+                    raise ValueError("Locked/background layer or a child of a locked group cannot be reordered: " + target)
                 if participates_in_clipping_chain(target):
                     raise ValueError("Layers participating in clipping-mask chains cannot be reordered in organizer v1: " + target)
                 if operation.get("expected_name") != layer["name"]:
