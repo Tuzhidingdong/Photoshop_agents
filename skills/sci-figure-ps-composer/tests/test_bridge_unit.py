@@ -1146,7 +1146,7 @@ class InspectPsdUnitTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["layer_count"], 5)
         self.assertEqual(result["group_count"], 1)
-        self.assertEqual(result["text_layer_count"], 1)
+        self.assertEqual(result["text_layer_count"], 2)
         self.assertEqual(result["smart_object_count"], 1)
         self.assertEqual(result["layers"][1]["node_key"], "root/G1")
         self.assertEqual(result["layers"][2]["parent_key"], "root/G1")
