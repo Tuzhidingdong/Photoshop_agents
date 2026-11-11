@@ -30,6 +30,7 @@ from ps_sci_toolkit import (
     _validate_organize_plan,
     apply_organize_plan,
     _parse_organize_verify_records,
+    _build_apply_organize_plan_jsx,
 )
 
 
@@ -1376,6 +1377,34 @@ class OrganizePlanValidationTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "must appear before"):
             _validate_organize_plan(plan, self.inspection)
+
+    def test_group_parent_rejects_position_locked_groups(self):
+        inspection = json.loads(json.dumps(self.inspection))
+        group = next(layer for layer in inspection["layers"] if layer["node_key"] == "root/G1")
+        group["position_locked"] = True
+        plan = self.plan([
+            {"action": "create_group", "key": "new_group", "name": "Nested", "parent": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "position-locked LayerSet"):
+            _validate_organize_plan(plan, inspection)
+
+    def test_apply_organize_jsx_handles_background_and_restores_preferences(self):
+        jsx = _build_apply_organize_plan_jsx({
+            "temp_input_path": "C:/Temp/source.psd",
+            "staged_output_path": "C:/Temp/output.psd",
+            "operations": [
+                {"action": "create_group", "key": "g", "name": "Group", "parent": "root"}
+            ],
+            "verify_refs": [],
+        })
+        self.assertIn("bottom.isBackgroundLayer", jsx)
+        self.assertIn("ElementPlacement.PLACEBEFORE", jsx)
+        self.assertIn("moveToEnd(group, parent)", jsx)
+        self.assertIn("app.preferences.rulerUnits = previousRulerUnits", jsx)
+        self.assertIn("app.preferences.typeUnits = previousTypeUnits", jsx)
+        self.assertIn("doc.saveAs(outputFile", jsx)
+        self.assertIn("SaveOptions.DONOTSAVECHANGES", jsx)
+
 
     def test_organizer_verification_records_are_decoded(self):
         encoded = _encode_inspection_record([
