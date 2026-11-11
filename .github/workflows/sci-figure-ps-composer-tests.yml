@@ -1,0 +1,29 @@
+name: sci-figure-ps-composer unit tests
+
+on:
+  push:
+    branches:
+      - main
+      - feat/sci-figure-ps-composer-stage1
+    paths:
+      - "skills/sci-figure-ps-composer/**"
+      - ".github/workflows/sci-figure-ps-composer-tests.yml"
+  pull_request:
+    paths:
+      - "skills/sci-figure-ps-composer/**"
+      - ".github/workflows/sci-figure-ps-composer-tests.yml"
+
+jobs:
+  bridge-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run bridge unit tests
+        run: python -m unittest discover -s skills/sci-figure-ps-composer/tests -v
