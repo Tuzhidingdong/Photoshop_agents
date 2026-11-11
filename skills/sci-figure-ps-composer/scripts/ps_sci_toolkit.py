@@ -11,6 +11,7 @@ import argparse
 import importlib.metadata
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -5738,10 +5739,13 @@ def _validate_classification_report(
             if item["node_key"] in available_previews:
                 raise ValueError("preview_report contains duplicate node_key: " + item["node_key"])
             available_previews[item["node_key"]] = item
-        if preview_path is not None:
+        preview_dir_value = preview_manifest.get("preview_dir")
+        if isinstance(preview_dir_value, str) and preview_dir_value.strip():
+            preview_root = Path(preview_dir_value).expanduser().resolve()
+        elif preview_path is not None:
             preview_root = preview_path.parent
         else:
-            preview_root = Path(str(preview_manifest.get("preview_dir", ""))).expanduser()
+            raise ValueError("preview_report must provide preview_dir when passed as an object.")
         for item in preview_items:
             if item.get("status") != "OK":
                 continue
