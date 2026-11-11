@@ -4061,21 +4061,37 @@ def inspect_psd(
 
     source_hash_before = _sha256_file(source_file)
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
-    jsx = _build_inspect_psd_jsx({"input_path": str(source_file)})
-    raw = active_bridge.execute_jsx(jsx)
-    protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
-    inspected = _parse_psd_inspection_records(protocol[2])
+    token = uuid.uuid4().hex[:16]
+    temp_input = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / (
+        "sci_insp_" + token + ".psd"
+    )
+    jsx = ""
+    try:
+        # Inspect a byte-identical temporary copy so an already-open, unsaved
+        # Photoshop document cannot silently change the on-disk inspection basis.
+        shutil.copy2(source_file, temp_input)
+        if _sha256_file(temp_input) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "Temporary inspection copy is not byte-identical to the source PSD.",
+                exception_type="WorkingCopyIntegrityError",
+            )
 
-    source_hash_after = _sha256_file(source_file)
-    if source_hash_after != source_hash_before:
-        raise PhotoshopBridgeError(
-            "inspect_psd",
-            "The source PSD SHA-256 changed during read-only inspection.",
-            exception_type="SourceIntegrityError",
-            jsx_preview=_clean_jsx_preview(jsx),
-        )
+        jsx = _build_inspect_psd_jsx({"input_path": str(temp_input)})
+        raw = active_bridge.execute_jsx(jsx)
+        protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
+        inspected = _parse_psd_inspection_records(protocol[2])
 
-    fingerprint_payload = [
+        source_hash_after = _sha256_file(source_file)
+        if source_hash_after != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "The source PSD SHA-256 changed during read-only inspection.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        fingerprint_payload = [
         {
             "node_key": layer["node_key"],
             "parent_key": layer["parent_key"],
@@ -4088,11 +4104,11 @@ def inspect_psd(
         }
         for layer in inspected["layers"]
     ]
-    fingerprint = hashlib.sha256(
-        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
-    report = {
+        report = {
         "schema_version": 1,
         "passed": True,
         "input_psd": str(source_file),
@@ -4107,20 +4123,26 @@ def inspect_psd(
         "source_sha256_unchanged": True,
     }
 
-    if report_file is not None:
-        temp_report = report_file.with_name(report_file.stem + ".tmp" + report_file.suffix)
-        try:
-            temp_report.write_text(
-                json.dumps(report, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(temp_report, report_file)
-        finally:
-            if temp_report.exists():
-                temp_report.unlink()
-        report["report_path"] = str(report_file)
+        if report_file is not None:
+            report["report_path"] = str(report_file)
+            temp_report = report_file.with_name(report_file.stem + ".tmp" + report_file.suffix)
+            try:
+                temp_report.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(temp_report, report_file)
+            finally:
+                if temp_report.exists():
+                    temp_report.unlink()
 
-    return report
+        return report
+    finally:
+        try:
+            if temp_input.exists():
+                temp_input.unlink()
+        except OSError:
+            pass
 
 
 
@@ -4188,10 +4210,10 @@ def _validate_organize_plan(
         # In Photoshop's front-to-back layer order, clipped layers sit above
         # the base layer they clip to. Moving/reordering that base can detach
         # the clipping relationship just as moving a clipped layer can.
-        return any(
-            sibling["clipped_to_below"]
-            for sibling in siblings[:position]
-        )
+        index = position - 1
+        while index >= 0 and siblings[index]["clipped_to_below"]:
+            return True
+        return False
     operations = plan.get("operations")
     if not isinstance(operations, list) or not operations:
         raise ValueError("Organizer plan must contain a non-empty operations array.")
