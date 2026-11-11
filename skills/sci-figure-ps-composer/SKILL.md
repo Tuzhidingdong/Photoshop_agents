@@ -325,7 +325,7 @@ result = preflight_figure(
 )
 ~~~
 
-The operation is read-only: Photoshop opens the PSD, inspects document and layer data, opens each panel Smart Object only to read its embedded pixel dimensions, and closes all inspection documents without saving. The input PSD's SHA-256 is checked before and after preflight.
+The operation is read-only: Photoshop opens the PSD, inspects document and layer data, opens each panel Smart Object only to read its embedded pixel dimensions, and closes all inspection documents without saving. It restores the prior active document, dialog setting, ruler units, and type units. The input PSD's SHA-256 is checked before and after preflight.
 
 Checks are returned as individual `PASS`, `WARN`, `FAIL`, or `INFO` entries:
 
