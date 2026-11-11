@@ -3739,7 +3739,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -3817,6 +3817,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-dir", type=Path)
     parser.add_argument("--export-basename")
     parser.add_argument("--export-dpi", type=int, choices=(300, 600))
+    parser.add_argument("--preflight-dpi", type=int, choices=(300, 600))
+    parser.add_argument("--preflight-width-cm", type=float)
+    parser.add_argument("--preflight-width-tolerance-cm", type=float, default=0.05)
+    parser.add_argument("--preflight-min-panel-ppi", type=float, default=300.0)
+    parser.add_argument("--preflight-panel-label-font", default="Arial-BoldMT")
+    parser.add_argument("--preflight-panel-label-min-pt", type=float, default=10.0)
+    parser.add_argument("--preflight-panel-label-max-pt", type=float, default=12.0)
+    parser.add_argument("--preflight-figure-text-font", default="ArialMT")
+    parser.add_argument("--preflight-figure-text-size-pt", type=float, default=7.0)
+    parser.add_argument("--preflight-text-size-tolerance-pt", type=float, default=0.5)
+    parser.add_argument("--preflight-skip-text-style-checks", action="store_true")
+    parser.add_argument("--preflight-no-panel-label-required", action="store_true")
+    parser.add_argument("--preflight-calibration-json", type=Path)
+    parser.add_argument("--preflight-calibration-tolerance-px", type=float, default=2.0)
+    parser.add_argument("--preflight-export-dir", type=Path)
+    parser.add_argument("--preflight-export-basename")
+    parser.add_argument("--preflight-strict", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--json",
@@ -3885,6 +3902,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "preflight-figure":
+        if args.input_psd is None:
+            print(
+                "ERROR: --input-psd is required for --action preflight-figure.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.preflight_calibration_json is not None and not args.preflight_calibration_json.is_file():
+            print(
+                "ERROR: calibration manifest does not exist: " +
+                str(args.preflight_calibration_json),
+                file=sys.stderr,
+            )
+            return 2
+
     if args.action == "export-figure":
         if args.input_psd is None:
             print(
@@ -3945,6 +3977,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                 size_pt=args.unify_font_size_pt,
                 color_hex=args.unify_font_color,
                 overwrite=args.overwrite,
+                bridge=bridge,
+            )
+        elif args.action == "preflight-figure":
+            result = preflight_figure(
+                args.input_psd,
+                expected_dpi=args.preflight_dpi,
+                expected_width_cm=args.preflight_width_cm,
+                width_tolerance_cm=args.preflight_width_tolerance_cm,
+                min_panel_ppi=args.preflight_min_panel_ppi,
+                require_panel_labels=not args.preflight_no_panel_label_required,
+                panel_label_font=args.preflight_panel_label_font,
+                panel_label_min_pt=args.preflight_panel_label_min_pt,
+                panel_label_max_pt=args.preflight_panel_label_max_pt,
+                figure_text_font=args.preflight_figure_text_font,
+                figure_text_size_pt=args.preflight_figure_text_size_pt,
+                text_size_tolerance_pt=args.preflight_text_size_tolerance_pt,
+                check_text_styles=not args.preflight_skip_text_style_checks,
+                calibrations=args.preflight_calibration_json,
+                calibration_default_tolerance_px=args.preflight_calibration_tolerance_px,
+                export_dir=args.preflight_export_dir,
+                export_basename=args.preflight_export_basename,
+                strict=args.preflight_strict,
                 bridge=bridge,
             )
         elif args.action == "export-figure":
