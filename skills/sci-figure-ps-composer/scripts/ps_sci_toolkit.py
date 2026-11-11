@@ -389,6 +389,57 @@ def _image_dimensions(image_path: Path) -> tuple[int, int]:
     return int(width), int(height)
 
 
+def _detect_trim_steps(image_path: Path) -> list[str]:
+    """Detect only the border trims actually needed, without changing the source.
+
+    Steps are returned in execution order: transparent pixels first, then a
+    same-color border matching the resulting top-left pixel.
+    """
+    try:
+        from PIL import Image, ImageChops
+    except ImportError as exc:
+        raise PhotoshopBridgeError(
+            "compose_grid",
+            "Pillow is required for Auto-Trim inspection.",
+            exception_type="MissingDependency",
+        ) from exc
+
+    try:
+        with Image.open(str(image_path)) as source:
+            rgba = source.convert("RGBA")
+            full_bounds = (0, 0, rgba.width, rgba.height)
+            alpha_bbox = rgba.getchannel("A").getbbox()
+            steps: list[str] = []
+
+            if alpha_bbox is None:
+                return []
+
+            if alpha_bbox != full_bounds:
+                steps.append("transparent")
+                inspection_image = rgba.crop(alpha_bbox)
+            else:
+                inspection_image = rgba
+
+            rgb = inspection_image.convert("RGB")
+            corner_color = rgb.getpixel((0, 0))
+            background = Image.new("RGB", rgb.size, corner_color)
+            different_pixels = ImageChops.difference(rgb, background)
+            different_bbox = different_pixels.getbbox()
+
+            # Photoshop TOPLEFT trim is needed only when pixels that differ
+            # from the corner-color are inset from at least one canvas edge.
+            if different_bbox is not None and different_bbox != (0, 0, rgb.width, rgb.height):
+                steps.append("top_left")
+
+            return steps
+    except Exception as exc:
+        raise PhotoshopBridgeError(
+            "compose_grid",
+            "Could not inspect trim borders for " + str(image_path) + ": " + str(exc),
+            exception_type=type(exc).__name__,
+        ) from exc
+
+
 def _panel_name(index: int) -> str:
     """Return spreadsheet-style lowercase panel names: a..z, aa, ab, ..."""
     if index < 0:
@@ -541,10 +592,20 @@ def _build_compose_grid_jsx(config: Dict[str, Any]) -> str:
         executeAction(charIDToTypeID("Plc "), descriptor, DialogModes.NO);
         return app.activeDocument.activeLayer;
     }
-    function trimEmbeddedObject(parentDoc, smartLayer) {
+    function trimEmbeddedObject(parentDoc, smartLayer, trimSteps) {
         var smartDoc = null;
         var changed = false;
         try {
+            if (!trimSteps || trimSteps.length === 0) {
+                return {
+                    changed: false,
+                    original_width: 0,
+                    original_height: 0,
+                    trimmed_width: 0,
+                    trimmed_height: 0
+                };
+            }
+
             parentDoc.activeLayer = smartLayer;
             executeAction(
                 stringIDToTypeID("placedLayerEditContents"),
@@ -555,36 +616,17 @@ def _build_compose_grid_jsx(config: Dict[str, Any]) -> str:
 
             var oldWidth = px(smartDoc.width);
             var oldHeight = px(smartDoc.height);
-            var whiteTopLeft = false;
 
-            // Only invoke color-based trim when the top-left pixel is near-white.
-            // This avoids trimming a dark feature when the source has no white
-            // corner. TOPLEFT uses the exact corner pixel as its trim color.
-            try {
-                var sampler = smartDoc.colorSamplers.add([
-                    new UnitValue(0, "px"),
-                    new UnitValue(0, "px")
-                ]);
-                var rgb = sampler.color.rgb;
-                whiteTopLeft = (
-                    rgb.red >= 245 &&
-                    rgb.green >= 245 &&
-                    rgb.blue >= 245
-                );
-                sampler.remove();
-            } catch (sampleError) {
-                whiteTopLeft = false;
-            }
+            for (var stepIndex = 0; stepIndex < trimSteps.length; stepIndex++) {
+                var trimStep = trimSteps[stepIndex];
 
-            // Trim using exactly one mode. Photoshop can reject the
-            // TRANSPARENT trim command when an opaque RGB/white-background
-            // image has no transparent border. The top-left color trim is
-            // sufficient for opaque white-margin exports; alpha-based
-            // sources use the transparent-pixel trim instead.
-            if (whiteTopLeft) {
-                smartDoc.trim(TrimType.TOPLEFT, true, true, true, true);
-            } else {
-                smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true);
+                if (trimStep === "transparent") {
+                    smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true);
+                } else if (trimStep === "top_left") {
+                    smartDoc.trim(TrimType.TOPLEFT, true, true, true, true);
+                } else {
+                    throw new Error("Unsupported trim step: " + trimStep);
+                }
             }
 
             var newWidth = px(smartDoc.width);
@@ -655,8 +697,8 @@ def _build_compose_grid_jsx(config: Dict[str, Any]) -> str:
             imageLayer.name = panel.layer_name;
             imageLayer.move(panelGroup, ElementPlacement.INSIDE);
 
-            if (cfg.auto_trim) {
-                var trimResult = trimEmbeddedObject(doc, imageLayer);
+            if (cfg.auto_trim && panel.trim_steps.length > 0) {
+                var trimResult = trimEmbeddedObject(doc, imageLayer, panel.trim_steps);
                 if (trimResult.changed) {
                     trimmedCount++;
                 }
@@ -839,6 +881,7 @@ def compose_grid(
     for path, panel_geometry in zip(paths, layout["panels"]):
         panel = dict(panel_geometry)
         panel["path"] = str(path)
+        panel["trim_steps"] = _detect_trim_steps(path) if auto_trim else []
         panels.append(panel)
 
     config = {
