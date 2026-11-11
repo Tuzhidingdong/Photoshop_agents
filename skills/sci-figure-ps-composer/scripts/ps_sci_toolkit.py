@@ -6147,6 +6147,29 @@ def _validate_classification_report(
                         "layer_type evidence does not match the inspected node type: " + key
                     )
                 normalized_item["observed_kind"] = source_layer["kind"]
+            elif evidence_type == "layer_metadata":
+                fields = evidence_item.get("fields")
+                if not isinstance(fields, dict) or not fields:
+                    raise ValueError("layer_metadata evidence requires a non-empty fields object: " + key)
+                unsupported_fields = sorted(set(fields) - set(PSD_LAYER_METADATA_EVIDENCE_FIELDS))
+                if unsupported_fields:
+                    raise ValueError(
+                        "layer_metadata evidence contains unsupported fields for "
+                        + key + ": " + ", ".join(unsupported_fields)
+                    )
+                for field_name, observed_value in fields.items():
+                    if field_name not in source_layer:
+                        raise ValueError(
+                            "layer_metadata evidence references an unavailable inspected field: "
+                            + key + "/" + field_name
+                        )
+                    actual_value = source_layer[field_name]
+                    if type(observed_value) is not type(actual_value) or observed_value != actual_value:
+                        raise ValueError(
+                            "layer_metadata evidence does not match inspected value: "
+                            + key + "/" + field_name
+                        )
+                normalized_item["fields"] = fields
             elif evidence_type == "geometry":
                 observed_bounds = evidence_item.get("bounds_px")
                 actual_bounds = source_layer.get("bounds_px")
@@ -6223,6 +6246,23 @@ def _validate_classification_report(
         if role in ("panel_image", "legend", "axis", "decoration") and not has_visual_evidence:
             warnings.append(
                 key + " uses a visual semantic role without visual evidence."
+            )
+        if role == "background" and source_layer.get("is_background") is not True:
+            raise ValueError(
+                "background role requires Photoshop's native is_background flag: " + key
+            )
+        if source_layer.get("is_background") is True and role != "background":
+            raise ValueError(
+                "Photoshop's native Background layer must use role='background': " + key
+            )
+        if role == "background" and not any(
+            item["type"] == "layer_metadata"
+            and item.get("fields", {}).get("is_background") is True
+            for item in normalized_evidence
+        ):
+            raise ValueError(
+                "background role requires validated layer_metadata evidence for is_background=true: "
+                + key
             )
         if role == "panel_group" and source_layer["typename"] != "LayerSet":
             raise ValueError("panel_group role requires a LayerSet: " + key)
