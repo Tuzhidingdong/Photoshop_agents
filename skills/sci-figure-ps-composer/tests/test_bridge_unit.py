@@ -25,6 +25,7 @@ from ps_sci_toolkit import (
     export_figure,
     _inspect_export_raster,
     preflight_figure,
+    inspect_psd,
 )
 
 
@@ -52,6 +53,18 @@ class PhotoshopBridgeUnitTests(unittest.TestCase):
 
         self.assertEqual(result, "42")
         self.assertEqual(app.calls, ["1 + 1;"])
+
+    def test_interactive_execution_mode_allows_photoshop_dialogs(self):
+        app = FakePhotoshopApplication(["ok"])
+        bridge = PhotoshopBridge(app=app, execution_mode="interactive")
+
+        self.assertEqual(bridge.execute_jsx("app.displayDialogs = DialogModes.NO;"), "ok")
+        self.assertIn("DialogModes.ALL", app.calls[0])
+        self.assertNotIn("DialogModes.NO", app.calls[0])
+
+    def test_execution_mode_rejects_unknown_values(self):
+        with self.assertRaises(ValueError):
+            PhotoshopBridge(app=FakePhotoshopApplication(), execution_mode="headless")
 
     def test_execute_jsx_rejects_empty_source(self):
         bridge = PhotoshopBridge(app=FakePhotoshopApplication())
@@ -1053,6 +1066,120 @@ def _make_preflight_response(*, missing_first_smart_object=False):
         930, 670, 972, 680,
     ]))
     return "SCI_PS_PREFLIGHT\tOK\t" + "\n".join(rows)
+
+
+
+class FakeInspectBridge:
+    def __init__(self, response):
+        self.response = response
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        return self.response
+
+
+def _encode_inspection_record(values):
+    from urllib.parse import quote
+    return "|".join(quote(str(value), safe="-_.!~*'()") for value in values)
+
+
+def _make_inspection_response():
+    rows = [
+        _encode_inspection_record(["DOC", "Legacy Figure", 1200, 800, 300, "RGB", "sRGB IEC61966-2.1"]),
+        _encode_inspection_record(["COUNT", 4]),
+        _encode_inspection_record([
+            "LAYER", "root/L0", "root", 0, 0, "ArtLayer", "Background",
+            "LayerKind.NORMAL", True, 100, "BlendMode.NORMAL", True, True, True,
+            True, False, 0, 0, 1200, 800, "", "", "", "",
+            "Legacy Figure/Background",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/G1", "root", 1, 0, "LayerSet", "Old Group",
+            "LayerSet", True, 100, "BlendMode.PASS_THROUGH", False, False,
+            False, False, False, 100, 100, 700, 700, "", "", "", "",
+            "Legacy Figure/Old Group",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/G1/L0", "root/G1", 0, 1, "ArtLayer", "Caption copy",
+            "LayerKind.TEXT", True, 100, "BlendMode.NORMAL", False, False,
+            False, False, False, 120, 120, 400, 170, "Electrochemical data",
+            "ArialMT", 8, "#000000",
+            "Legacy Figure/Old Group/Caption copy",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/L2", "root", 2, 0, "ArtLayer", "Micrograph",
+            "LayerKind.SMARTOBJECT", True, 100, "BlendMode.NORMAL", False,
+            False, False, False, False, 720, 100, 1180, 700, "", "", "", "",
+            "Legacy Figure/Micrograph",
+        ]),
+    ]
+    # The deliberately ordered record count is four: background, group,
+    # nested text, and the Smart Object.
+    return "SCI_PS_INSPECT_PSD\tOK\t" + "\n".join(rows)
+
+
+class InspectPsdUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_inspect_psd_returns_ordered_nested_layer_tree(self):
+        bridge = FakeInspectBridge(_make_inspection_response())
+        result = inspect_psd(self.input_psd, bridge=bridge)
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["layer_count"], 4)
+        self.assertEqual(result["group_count"], 1)
+        self.assertEqual(result["text_layer_count"], 1)
+        self.assertEqual(result["smart_object_count"], 1)
+        self.assertEqual(result["layers"][1]["node_key"], "root/G1")
+        self.assertEqual(result["layers"][2]["parent_key"], "root/G1")
+        self.assertEqual(result["layers"][2]["text"]["contents"], "Electrochemical data")
+        self.assertEqual(result["layers"][3]["kind"], "LayerKind.SMARTOBJECT")
+        self.assertEqual(len(result["layer_tree_sha256"]), 64)
+        self.assertTrue(result["source_sha256_unchanged"])
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+        self.assertIn("container.layers", bridge.jsx_calls[0])
+        self.assertIn("app.preferences.rulerUnits = previousRulerUnits", bridge.jsx_calls[0])
+
+    def test_inspect_psd_can_write_a_new_json_report(self):
+        bridge = FakeInspectBridge(_make_inspection_response())
+        report_path = self.root / "reports" / "Legacy_inspection.json"
+
+        result = inspect_psd(self.input_psd, report_path=report_path, bridge=bridge)
+
+        self.assertEqual(result["report_path"], str(report_path))
+        saved = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["source_sha256"], result["source_sha256"])
+        self.assertEqual(saved["layer_count"], 4)
+
+    def test_inspect_psd_does_not_overwrite_an_existing_report(self):
+        report_path = self.root / "existing.json"
+        report_path.write_text("keep", encoding="utf-8")
+        bridge = FakeInspectBridge(_make_inspection_response())
+
+        with self.assertRaises(FileExistsError):
+            inspect_psd(self.input_psd, report_path=report_path, bridge=bridge)
+
+        self.assertEqual(report_path.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_inspect_psd_rejects_malformed_layer_record_count(self):
+        response = (
+            "SCI_PS_INSPECT_PSD\tOK\t"
+            + _encode_inspection_record(["DOC", "Bad", 100, 100, 300, "RGB", ""])
+            + "\n"
+            + _encode_inspection_record(["COUNT", 2])
+        )
+        bridge = FakeInspectBridge(response)
+        with self.assertRaises(ValueError):
+            inspect_psd(self.input_psd, bridge=bridge)
 
 
 class PreflightFigureUnitTests(unittest.TestCase):
