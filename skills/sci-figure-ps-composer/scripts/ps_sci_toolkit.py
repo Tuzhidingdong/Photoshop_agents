@@ -3840,7 +3840,7 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
             profile = String(doc.colorProfileName);
         } catch (profileError) {}
         rows.push(encodeRecord([
-            "DOC", doc.name, width, height, dpi, mode, profile
+            "DOC", cfg.document_label, width, height, dpi, mode, profile
         ]));
 
         function walk(container, parentKey, parentPath, depth) {
@@ -3885,7 +3885,7 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
             }
         }
 
-        walk(doc, "root", doc.name, 0);
+        walk(doc, "root", cfg.document_label, 0);
         rows.unshift(encodeRecord(["COUNT", layerCount]));
 
         doc.close(SaveOptions.DONOTSAVECHANGES);
@@ -4077,7 +4077,10 @@ def inspect_psd(
                 exception_type="WorkingCopyIntegrityError",
             )
 
-        jsx = _build_inspect_psd_jsx({"input_path": str(temp_input)})
+        jsx = _build_inspect_psd_jsx({
+            "input_path": str(temp_input),
+            "document_label": source_file.name,
+        })
         raw = active_bridge.execute_jsx(jsx)
         protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
         inspected = _parse_psd_inspection_records(protocol[2])
