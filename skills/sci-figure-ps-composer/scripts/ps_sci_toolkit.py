@@ -5711,6 +5711,115 @@ def _load_json_object(
     return loaded, None
 
 
+def _suggest_psd_semantic_role(
+    layer: Dict[str, Any],
+    layer_by_key: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return a conservative metadata/name-pattern hint, never a final classification."""
+    key = str(layer.get("node_key", ""))
+    name = str(layer.get("name", ""))
+    typename = layer.get("typename")
+    kind = layer.get("kind")
+    text_data = layer.get("text") if isinstance(layer.get("text"), dict) else {}
+    text_value = str(text_data.get("contents", "")).strip()
+
+    def parent_layer() -> Optional[Dict[str, Any]]:
+        parent_key = layer.get("parent_key")
+        return layer_by_key.get(parent_key) if isinstance(parent_key, str) else None
+
+    parent = parent_layer()
+    parent_name = str(parent.get("name", "")) if parent else ""
+
+    def suffix_after(prefix: str) -> Optional[str]:
+        if not name.startswith(prefix):
+            return None
+        suffix = name[len(prefix):]
+        return suffix if len(suffix) == 1 and suffix.isalpha() else None
+
+    candidate: Optional[str] = None
+    basis: list[str] = []
+    rationale = ""
+
+    if layer.get("is_background") is True:
+        candidate = "background"
+        basis = ["photoshop_is_background_flag"]
+        rationale = "Photoshop explicitly marks this node as the document Background layer."
+    elif typename == "LayerSet" and suffix_after("Group_Panel_") is not None:
+        candidate = "panel_group"
+        basis = ["layer_name_pattern", "photoshop_layer_set_type"]
+        rationale = (
+            "The name follows Group_Panel_<letter> and Photoshop reports a LayerSet; "
+            "this is a structural naming hint, not visual confirmation of panel contents."
+        )
+    elif kind == "LayerKind.TEXT" and suffix_after("Panel_Label_") is not None:
+        suffix = suffix_after("Panel_Label_")
+        if text_value == suffix:
+            candidate = "panel_label"
+            basis = ["layer_name_pattern", "native_text_type", "matching_text_content"]
+            rationale = (
+                "The editable text layer name and its one-letter text content share "
+                "the same panel suffix."
+            )
+    elif kind == "LayerKind.SMARTOBJECT" and suffix_after("Image_Panel_") is not None:
+        suffix = suffix_after("Image_Panel_")
+        if parent_name == "Group_Panel_" + str(suffix):
+            candidate = "panel_image"
+            basis = ["layer_name_pattern", "smart_object_type", "matching_parent_group"]
+            rationale = (
+                "The Smart Object name and its immediate parent panel group share "
+                "the same suffix."
+            )
+    elif kind == "LayerKind.TEXT" and suffix_after("Scale_Label_") is not None:
+        if parent_name == "Group_Panel_" + str(suffix_after("Scale_Label_")) and text_value:
+            candidate = "scale_label"
+            basis = ["layer_name_pattern", "native_text_type", "parent_panel_group", "text_content_present"]
+            rationale = (
+                "The editable text layer follows the Scale_Label pattern, is inside "
+                "the correspondingly named panel group, and contains text."
+            )
+    elif typename == "ArtLayer" and (
+        name.startswith("Scale_Bar_") or name.startswith("Scale_Bar_Outline_")
+    ):
+        suffix = (
+            name[len("Scale_Bar_Outline_"):]
+            if name.startswith("Scale_Bar_Outline_")
+            else name[len("Scale_Bar_"):]
+        )
+        if len(suffix) == 1 and suffix.isalpha() and parent_name == "Group_Panel_" + suffix:
+            candidate = "scale_bar"
+            basis = ["layer_name_pattern", "photoshop_art_layer_type", "parent_panel_group"]
+            rationale = (
+                "The layer follows a Scale_Bar naming pattern and is inside the "
+                "correspondingly named panel group; visual inspection must confirm its appearance."
+            )
+    elif "Test" in name or "_Test_" in name:
+        candidate = "test_artifact"
+        basis = ["test_marker_in_layer_name"]
+        rationale = (
+            "The layer name contains an explicit Test marker; confirm that it is "
+            "test-only content rather than intentional figure content."
+        )
+
+    if candidate is None:
+        return {
+            "candidate_role": "unknown",
+            "status": "no_rule_match",
+            "basis": [],
+            "rationale": "No conservative metadata/name-pattern rule matched; review the preview and retain unknown if unclear.",
+            "requires_visual_confirmation": True,
+            "is_final_classification": False,
+        }
+
+    return {
+        "candidate_role": candidate,
+        "status": "candidate_only",
+        "basis": basis,
+        "rationale": rationale,
+        "requires_visual_confirmation": candidate != "background",
+        "is_final_classification": False,
+    }
+
+
 def create_psd_classification_template(
     input_psd: str | Path,
     inspection_report: Dict[str, Any] | str | Path,
@@ -5805,6 +5914,7 @@ def create_psd_classification_template(
 
     for layer in raw_layers:
         key = layer["node_key"]
+        role_suggestion = _suggest_psd_semantic_role(layer, layer_by_key)
         evidence_candidates: list[Dict[str, Any]] = [
             {"type": "layer_name", "observation": layer["name"]},
             {"type": "layer_type", "observation": layer["kind"] or layer["typename"]},
@@ -5908,6 +6018,7 @@ def create_psd_classification_template(
             "is_background": is_background,
             "text": text_data,
             "classification_seed": seed,
+            "role_suggestion": role_suggestion,
             "available_evidence": evidence_candidates,
             "isolated_preview": preview_info,
         })
@@ -5953,6 +6064,8 @@ def create_psd_classification_template(
             "only_claim_visual_review_after_opening_the_referenced_preview": True,
             "background_role_is_derived_only_from_photoshop_is_background_flag": True,
             "do_not_create_organizer_operations_during_classification": True,
+            "role_suggestions_are_hints_not_final_classifications": True,
+            "non_background_role_suggestions_require_preview_review": True,
         },
         "nodes": nodes,
     }
