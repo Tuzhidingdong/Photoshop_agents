@@ -120,6 +120,19 @@ class PhotoshopBridgeUnitTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.exception_type, "InvalidBridgeResponse")
 
+    def test_short_jsx_error_response_is_preserved(self):
+        app = FakePhotoshopApplication([
+            "SCI_PS_UNITS\tERROR\tUnitError\tCannot set units\t44"
+        ])
+        bridge = PhotoshopBridge(app=app)
+
+        with self.assertRaises(PhotoshopBridgeError) as caught:
+            bridge.lock_units()
+
+        self.assertEqual(caught.exception.exception_type, "ExtendScriptError")
+        self.assertIn("Cannot set units", str(caught.exception))
+        self.assertIn("line 44", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
