@@ -48,10 +48,24 @@ python scripts/ps_sci_toolkit.py --action compose-grid `
 ~~~
 
 # Add editable labels to a copy of the composed PSD.
-python scripts/ps_sci_toolkit.py --action add-panel-labels \`
-  --input-psd Figure_1.psd --output Figure_1_labeled.psd \`
-  --label-style lowercase --font-postscript Arial-BoldMT \`
+python scripts/ps_sci_toolkit.py --action add-panel-labels `
+  --input-psd Figure_1.psd --output Figure_1_labeled.psd `
+  --label-style lowercase --font-postscript Arial-BoldMT `
   --font-size-pt 10 --label-inset-cm 0.1
+
+# Add a 120-document-pixel scale bar to panel a.
+python scripts/ps_sci_toolkit.py --action add-scale-bar `
+  --input-psd Figure_1_labeled.psd --output Figure_1_scalebar.psd `
+  --panel-id a --scale-mode pixels --bar-width-px 120 `
+  --bar-color "#000000" --bar-outline "#FFFFFF"
+
+# Add a physically calibrated 10 µm scale bar to panel a.
+# pixel-size means µm per source-image pixel.
+python scripts/ps_sci_toolkit.py --action add-scale-bar `
+  --input-psd Figure_1_labeled.psd --output Figure_1_scalebar.psd `
+  --panel-id a --scale-mode physical --scale-length 10 `
+  --pixel-size 0.2 --scale-unit "µm" `
+  --bar-color "#000000" --bar-outline "#FFFFFF"
 ~~~
 
 The default action is diagnose.
@@ -71,6 +85,14 @@ python tests/test_add_panel_labels_demo.py --input-psd path\to\Figure_Grid_Stage
 ~~~
 
 The Stage 3 test saves a separate labeled PSD, reopens it in Photoshop, and verifies one editable Arial Bold text layer per panel group, the selected label style, 10 pt size by default, black text, and non-empty output. It never saves changes back to the input PSD.
+
+After Stage 3 passes, run the Stage 4 scale-bar test against the labeled PSD:
+
+~~~powershell
+python tests/test_add_scale_bar_demo.py --input-psd path\to\Figure_Grid_Stage2_Stage3_Labeled.psd
+~~~
+
+The Stage 4 integration test adds a calibrated 10 µm bar to panel a, with a separate bar layer, contrasting outline layer, and editable text layer. It reopens the output and verifies the bar width against the physical calibration, the bottom-right placement, and preservation of the existing panel label and all other groups. It also verifies that the source PSD hash is unchanged.
 
 ### Bridge behavior
 
@@ -143,8 +165,8 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 
 ## Remaining feature milestones
 
-1. `add_panel_labels`: implemented; unit-tested in CI; awaiting real Photoshop Stage 3 text-layer integration verification.
-2. `add_scale_bar`: explicit-pixel and physically calibrated scale bars, with editable bar and label layers.
+1. `add_panel_labels`: implemented; CI and real Photoshop Stage 3 integration verified.
+2. `add_scale_bar`: implemented; CI and real Photoshop Stage 4 integration verification pending.
 3. `unify_fonts`: recursive text-layer traversal and selective font/size/color normalization.
 4. `export_figure`: editable PSD plus RGB LZW TIFF and high-resolution PNG.
 5. `preflight_figure`: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
@@ -177,6 +199,7 @@ Then run the real Photoshop integration checks on the Windows machine:
 python scripts/ps_sci_toolkit.py --action diagnose
 python tests/test_compose_grid_demo.py
 python tests/test_add_panel_labels_demo.py --input-psd path\\to\\Figure_Grid_Stage2.psd
+python tests/test_add_scale_bar_demo.py --input-psd path\\to\\Figure_Grid_Stage2_Stage3_Labeled.psd
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Stage 2 and Stage 3 integration passes additionally require the respective saved PSDs to be reopened in Photoshop and their native document/layer structures to be inspected. Unit tests alone are not proof of Photoshop compatibility.
