@@ -3084,6 +3084,8 @@ def _parse_preflight_records(encoded_records: str) -> Dict[str, Any]:
 
 def _normalize_scale_calibrations(
     calibrations: Optional[Dict[str, Any] | str | Path],
+    *,
+    default_tolerance_px: float = 2.0,
 ) -> Dict[str, Dict[str, Any]]:
     if calibrations is None:
         return {}
@@ -3103,7 +3105,7 @@ def _normalize_scale_calibrations(
             physical_length = float(item["physical_length"])
             pixel_size = float(item["pixel_size"])
             unit = str(item["unit"]).strip()
-            tolerance_px = float(item.get("tolerance_px", 2.0))
+            tolerance_px = float(item.get("tolerance_px", default_tolerance_px))
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 "Calibration for panel " + str(panel_id) +
@@ -3166,10 +3168,15 @@ def preflight_figure(
         raise ValueError("Panel-label point-size range is invalid.")
     if float(text_size_tolerance_pt) < 0:
         raise ValueError("text_size_tolerance_pt cannot be negative.")
+    if float(figure_text_size_pt) <= 0:
+        raise ValueError("figure_text_size_pt must be greater than zero.")
     if float(calibration_default_tolerance_px) < 0:
         raise ValueError("calibration_default_tolerance_px cannot be negative.")
 
-    calibration_map = _normalize_scale_calibrations(calibrations)
+    calibration_map = _normalize_scale_calibrations(
+        calibrations,
+        default_tolerance_px=float(calibration_default_tolerance_px),
+    )
     if not isinstance(panel_label_font, str) or not panel_label_font.strip():
         raise ValueError("panel_label_font must be a non-empty PostScript font name.")
     if not isinstance(figure_text_font, str) or not figure_text_font.strip():
