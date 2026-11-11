@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization has passed the nested-group Photoshop save/reopen test. The Stage 6 PSD/TIFF/PNG publication export is implemented and covered by unit tests; its real Photoshop export and metadata verification is the current integration check. Temporary export paths use short UUID-based names to remain within Windows legacy path limits. Publication preflight remains on the roadmap.
+The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization has passed the nested-group Photoshop save/reopen test. The Stage 6 PSD/TIFF/PNG publication export has passed real Photoshop verification, including TIFF LZW metadata, RGB mode, DPI, dimensions, and byte-identical PSD preservation. Stage 7 publication preflight is implemented and covered by unit tests; its read-only Photoshop integration test is the final validation step.
 
 ## Runtime requirements
 
@@ -76,7 +76,12 @@ python scripts/ps_sci_toolkit.py --action unify-fonts `
 python scripts/ps_sci_toolkit.py --action export-figure `
   --input-psd Figure_1_fonts.psd --export-dir Figure_1_exports `
   --export-dpi 300
-~~~
+
+# Run a non-destructive publication preflight on an editable PSD.
+python scripts/ps_sci_toolkit.py --action preflight-figure `
+  --input-psd Figure_1_fonts.psd --preflight-dpi 300 `
+  --preflight-min-panel-ppi 300 --preflight-export-dir Figure_1_exports `
+  --preflight-calibration-json Figure_1_calibration.json
 
 The default action is diagnose.
 
@@ -109,6 +114,7 @@ After Stage 4 passes, run the Stage 5 recursive font-normalization integration t
 ~~~powershell
 python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
 python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
+python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 ~~~
 
 The Stage 5 demo creates a separate fixture PSD with an additional text layer nested two groups deep, then normalizes the font, point size, and color of every editable text layer into a new PSD. It reopens that output and verifies every text layer, including the nested test layer, as well as preservation of the four panel labels and scale-bar label. Both the supplied input PSD and the generated fixture PSD are checked for unchanged hashes.
@@ -195,8 +201,8 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 1. `add_panel_labels`: implemented; CI and real Photoshop Stage 3 integration verified.
 2. `add_scale_bar`: implemented; CI and real Photoshop Stage 4 integration verified.
 3. `unify_fonts`: implemented; unit tests and real Photoshop Stage 5 recursive integration verified.
-4. `export_figure`: implemented; unit tests cover editable PSD copy, RGB LZW TIFF, RGB PNG, DPI, dimensions, and output protection; real Photoshop Stage 6 verification pending.
-5. `preflight_figure`: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
+4. `export_figure`: implemented; unit tests and real Photoshop Stage 6 export verification passed.
+5. `preflight_figure`: implemented; unit tests cover geometry, PPI, labels/fonts, scale calibration, export metadata, strict mode, and source protection; real Photoshop Stage 7 verification pending.
 
 ## add_scale_bar: current implementation
 
@@ -285,6 +291,62 @@ The TIFF and PNG are created from two independent duplicates of the source docum
 Before publishing the output bundle, Photoshop reopens all three staged files and checks their dimensions, RGB mode, and resolution. Python then reads TIFF/PNG metadata only: RGB mode, pixel dimensions, DPI, and TIFF compression tag 259 (value 5 = LZW). It does not re-encode the images. Output files are staged under short UUID-based temporary names in the export directory (the staging names deliberately do not repeat the potentially long scientific figure basename) and moved into their final paths only after export and metadata checks succeed. Filesystem failures identify the current export phase. The source PSD's SHA-256 must remain unchanged.
 
 The CLI options are `--unify-font-postscript`, `--unify-font-size-pt`, and `--unify-font-color`; specify at least one. The real Photoshop demo deliberately inserts a text layer two groups deep before normalization to prove the recursive traversal, then reopens the result to check every text layer.
+
+## preflight_figure: current implementation
+
+The Python API is:
+
+~~~python
+from ps_sci_toolkit import preflight_figure
+
+result = preflight_figure(
+    "Figure_1_fonts.psd",
+    expected_dpi=300,
+    expected_width_cm=17.6,
+    min_panel_ppi=300,
+    calibrations={
+        "a": {
+            "physical_length": 10,
+            "pixel_size": 0.2,
+            "unit": "µm",
+            "tolerance_px": 2.0,
+        }
+    },
+    export_dir="Figure_1_exports",
+)
+~~~
+
+The operation is read-only: Photoshop opens the PSD, inspects document and layer data, opens each panel Smart Object only to read its embedded pixel dimensions, and closes all inspection documents without saving. The input PSD's SHA-256 is checked before and after preflight.
+
+Checks are returned as individual `PASS`, `WARN`, `FAIL`, or `INFO` entries:
+
+- Canvas geometry, RGB mode, 300/600 DPI, optional journal width, and color-profile presence.
+- One image Smart Object per panel group, panel bounds within the canvas, and overlapping panel-image bounds.
+- Effective panel PPI calculated from the embedded Smart Object's post-trim pixel dimensions, its on-canvas displayed bounds, and document DPI.
+- Panel label presence, editable text, expected Arial Bold 10–12 pt black styling, identifier content, and position.
+- Figure text font/size/color and canvas containment.
+- Scale-bar rectangle/outline/label geometry. Physical width and label are independently verified only when a calibration manifest is supplied; the PSD alone does not establish physical units.
+
+A calibration manifest is a JSON object keyed by panel ID, for example:
+
+~~~json
+{
+  "a": {
+    "physical_length": 10,
+    "pixel_size": 0.2,
+    "unit": "µm",
+    "tolerance_px": 2
+  }
+}
+~~~
+
+Here `pixel_size` is physical units per embedded Smart Object source pixel. The expected displayed bar width is computed from that calibration and the Smart Object's actual post-trim dimensions and on-canvas transform.
+
+When `export_dir` is supplied, preflight also checks the byte-identical editable PSD copy, RGB TIFF dimensions/DPI/LZW tag, and RGB PNG dimensions/DPI. Without an export directory or calibration manifest, those checks are explicitly marked as not assessed rather than guessed.
+
+Typography and effective-PPI deviations are warnings by default because figures may have journal-specific exceptions. Use `strict=True` or CLI `--preflight-strict` to promote all warnings to failures. Structural corruption, wrong color mode/DPI, invalid geometry, broken scale-bar components, failed supplied calibrations, or invalid exports are failures regardless of strict mode.
+
+The CLI action is `preflight-figure`; useful options include `--preflight-min-panel-ppi`, `--preflight-dpi`, `--preflight-width-cm`, `--preflight-calibration-json`, `--preflight-export-dir`, and `--preflight-strict`. The Stage 7 Windows demo uses the known synthetic Stage 4 calibration (10 µm at 0.2 µm/source px) only for the generated demo figure; real research figures must supply their own manifest.
 Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
 
 ## Error handling
@@ -315,6 +377,7 @@ python tests/test_compose_grid_demo.py
 python tests/test_add_panel_labels_demo.py --input-psd path\\to\\Figure_Grid_Stage2.psd
 python tests/test_add_scale_bar_demo.py --input-psd path\\to\\Figure_Grid_Stage2_Stage3_Labeled.psd
 python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
+python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Stage 2 and Stage 3 integration passes additionally require the respective saved PSDs to be reopened in Photoshop and their native document/layer structures to be inspected. Unit tests alone are not proof of Photoshop compatibility.
