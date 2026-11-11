@@ -855,6 +855,15 @@ class ExportFigureUnitTests(unittest.TestCase):
 
         self.assertEqual(len(bridge.jsx_calls), 1)
         jsx = bridge.jsx_calls[0]
+        import json
+        import re
+        config_match = re.search(r"var cfg = (\\{.*\\});", jsx)
+        self.assertIsNotNone(config_match)
+        config = json.loads(config_match.group(1))
+        self.assertTrue(Path(config["psd_temp_path"]).name.startswith(".sci_ps_"))
+        self.assertTrue(Path(config["tiff_temp_path"]).name.startswith(".sci_tif_"))
+        self.assertTrue(Path(config["png_temp_path"]).name.startswith(".sci_png_"))
+        self.assertLess(len(config["psd_temp_path"]), len(str(self.output_dir / "Figure_1.psd")))
         self.assertIn("TIFFEncoding.TIFFLZW", jsx)
         self.assertIn("new TiffSaveOptions()", jsx)
         self.assertIn("new PNGSaveOptions()", jsx)
@@ -940,6 +949,33 @@ class ExportFigureUnitTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.operation, "export_figure")
         self.assertIn("compression tag", str(caught.exception))
+
+
+
+    def test_export_figure_uses_short_temp_names_for_long_scientific_basename(self):
+        long_basename = (
+            "Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified"
+        )
+        bridge = FakeExportFigureBridge(width=40, height=30, dpi=300)
+        result = export_figure(
+            self.input_psd,
+            self.output_dir,
+            basename=long_basename,
+            expected_dpi=300,
+            bridge=bridge,
+        )
+
+        import json
+        import re
+        jsx = bridge.jsx_calls[0]
+        match = re.search(r"var cfg = (\\{.*\\});", jsx)
+        self.assertIsNotNone(match)
+        config = json.loads(match.group(1))
+        for key in ("psd_temp_path", "tiff_temp_path", "png_temp_path"):
+            temp_path = Path(config[key])
+            self.assertLess(len(str(temp_path)), 240)
+            self.assertNotIn(long_basename, temp_path.name)
+        self.assertEqual(Path(result["editable_psd"]["path"]).name, long_basename + ".psd")
 
 
 
