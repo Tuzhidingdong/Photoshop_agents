@@ -1435,6 +1435,44 @@ class PsdSemanticClassificationTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_layer_name_and_layer_type_evidence_must_match_inspection(self):
+        wrong_name = _make_valid_classification(self.inspection)
+        wrong_name["classifications"][0]["evidence"][0]["observation"] = "Invented group name"
+        with self.assertRaisesRegex(ValueError, "exact inspected layer name"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_name)
+
+        wrong_type = _make_valid_classification(self.inspection)
+        smart = next(
+            item for item in wrong_type["classifications"]
+            if item["role"] == "panel_image"
+        )
+        smart["evidence"] = [{"type": "layer_type", "observation": "LayerKind.TEXT"}]
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_type)
+
+    def test_text_and_geometry_evidence_must_match_inspected_values(self):
+        wrong_text = _make_valid_classification(self.inspection)
+        text_item = next(
+            item for item in wrong_text["classifications"]
+            if item["role"] == "title"
+        )
+        text_item["evidence"][0]["observation"] = "Text that is not in the layer"
+        with self.assertRaisesRegex(ValueError, "quote text actually present"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_text)
+
+        wrong_geometry = _make_valid_classification(self.inspection)
+        group = next(
+            item for item in wrong_geometry["classifications"]
+            if item["role"] == "unknown"
+        )
+        group["evidence"] = [{
+            "type": "geometry",
+            "observation": "The bounds identify the proposed panel.",
+            "bounds_px": [0, 0, 1, 1],
+        }]
+        with self.assertRaisesRegex(ValueError, "bounds_px do not match"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_geometry)
+
     def test_validate_classification_checks_every_node_and_evidence(self):
         result = validate_psd_classification(
             self.input_psd,
