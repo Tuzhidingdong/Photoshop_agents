@@ -3819,10 +3819,6 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
     var doc = null;
     var rows = [];
     var layerCount = 0;
-    var layerMap = {};
-    var parentMap = {};
-    var visibleMap = {};
-    var previewCandidates = [];
 
     try {
         app.displayDialogs = DialogModes.NO;
@@ -3882,19 +3878,6 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
                     layerPath
                 ]));
                 layerCount++;
-                layerMap[nodeKey] = layer;
-                parentMap[nodeKey] = parentKey;
-                visibleMap[nodeKey] = Boolean(safeProperty(layer, "visible", true));
-                if (!isGroup && visibleMap[nodeKey] &&
-                    kind !== "LayerKind.SMARTOBJECT" &&
-                    kind !== "LayerKind.TEXT" &&
-                    kind.indexOf("LayerKind.") === 0) {
-                    previewCandidates.push(nodeKey);
-                } else if (!isGroup && visibleMap[nodeKey] &&
-                    (kind === "LayerKind.SMARTOBJECT" || kind === "LayerKind.TEXT")) {
-                    previewCandidates.push(nodeKey);
-                }
-
                 if (isGroup) {
                     walk(layer, nodeKey, layerPath, depth + 1);
                 }
@@ -3903,171 +3886,6 @@ def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
 
         walk(doc, "root", cfg.document_label, 0);
         rows.unshift(encodeRecord(["COUNT", layerCount]));
-
-        function hideAll(container) {
-            var collection = container.layers;
-            for (var h = 0; h < collection.length; h++) {
-                var hiddenLayer = collection[h];
-                hiddenLayer.visible = false;
-                if (hiddenLayer.typename === "LayerSet") {
-                    hideAll(hiddenLayer);
-                }
-            }
-        }
-        function restoreVisibility(container, parentKey) {
-            var collection = container.layers;
-            for (var r = 0; r < collection.length; r++) {
-                var restoredLayer = collection[r];
-                var isGroup = restoredLayer.typename === "LayerSet";
-                var key = parentKey + "/" + (isGroup ? "G" : "L") + r;
-                restoredLayer.visible = visibleMap[key] === true;
-                if (isGroup) {
-                    restoreVisibility(restoredLayer, key);
-                }
-            }
-        }
-        function showTargetAndAncestors(container, key) {
-            var target = layerMap[key];
-            if (target === undefined) {
-                throw new Error("Preview target layer no longer exists: " + key);
-            }
-            target.visible = true;
-            var parent = parentMap[key];
-            while (parent !== undefined && parent !== "root") {
-                if (layerMap[parent] === undefined) {
-                    throw new Error("Preview ancestor no longer exists: " + parent);
-                }
-                layerMap[parent].visible = true;
-                parent = parentMap[parent];
-            }
-        }
-        function fitPreview(previewDoc, maxDimension) {
-            var width = previewDoc.width.as("px");
-            var height = previewDoc.height.as("px");
-            var longest = Math.max(width, height);
-            if (longest > maxDimension) {
-                var scale = maxDimension / longest;
-                previewDoc.resizeImage(
-                    UnitValue(Math.round(width * scale), "px"),
-                    UnitValue(Math.round(height * scale), "px"),
-                    undefined,
-                    ResampleMethod.BICUBIC
-                );
-            }
-        }
-        function savePng(previewDoc, path, maxDimension) {
-            var file = new File(path);
-            if (file.exists) {
-                throw new Error("Preview file already exists: " + path);
-            }
-            previewDoc.flatten();
-            fitPreview(previewDoc, maxDimension);
-            var options = new PNGSaveOptions();
-            options.interlaced = false;
-            previewDoc.saveAs(file, options, true, Extension.LOWERCASE);
-            if (!file.exists || file.length <= 0) {
-                throw new Error("Photoshop did not create preview: " + path);
-            }
-        }
-
-        if (cfg.preview_dir) {
-            var previewFolder = new Folder(cfg.preview_dir);
-            if (!previewFolder.exists && !previewFolder.create()) {
-                throw new Error("Could not create preview directory: " + cfg.preview_dir);
-            }
-            var compositeDoc = null;
-            try {
-                compositeDoc = doc.duplicate("SCI_PS_COMPOSITE_PREVIEW", false);
-                savePng(
-                    compositeDoc,
-                    cfg.preview_dir + "/composite.png",
-                    cfg.preview_max_dimension
-                );
-                rows.push(encodeRecord([
-                    "PREVIEW", "__composite__", "PASS",
-                    cfg.preview_dir + "/composite.png", "Full composite preview"
-                ]));
-            } finally {
-                if (compositeDoc !== null) {
-                    try {
-                        compositeDoc.close(SaveOptions.DONOTSAVECHANGES);
-                    } catch (compositeCloseError) {}
-                }
-            }
-
-            var workingPreviewDoc = null;
-            try {
-                workingPreviewDoc = doc.duplicate("SCI_PS_LAYER_PREVIEW_WORK", false);
-                var previewLayerMap = {};
-                function mapPreviewLayers(container, parentKey) {
-                    var collection = container.layers;
-                    for (var p = 0; p < collection.length; p++) {
-                        var candidateLayer = collection[p];
-                        var candidateIsGroup = candidateLayer.typename === "LayerSet";
-                        var candidateKey = parentKey + "/" +
-                            (candidateIsGroup ? "G" : "L") + p;
-                        previewLayerMap[candidateKey] = candidateLayer;
-                        if (candidateIsGroup) {
-                            mapPreviewLayers(candidateLayer, candidateKey);
-                        }
-                    }
-                }
-                mapPreviewLayers(workingPreviewDoc, "root");
-
-                var limit = Math.min(
-                    previewCandidates.length,
-                    Math.max(0, Number(cfg.preview_max_layers))
-                );
-                for (var candidateIndex = 0; candidateIndex < limit; candidateIndex++) {
-                    var candidateKey = previewCandidates[candidateIndex];
-                    var candidate = previewLayerMap[candidateKey];
-                    var previewNumber = candidateIndex + 1;
-                    var fileName = "layer_" +
-                        (previewNumber < 10 ? "0" : "") +
-                        previewNumber + ".png";
-                    var filePath = cfg.preview_dir + "/" + fileName;
-                    var renderDoc = null;
-                    try {
-                        // Restore the original visibility state before each
-                        // isolation pass, then hide every sibling.
-                        restoreVisibility(workingPreviewDoc, "root");
-                        hideAll(workingPreviewDoc);
-                        candidate.visible = true;
-                        var parent = parentMap[candidateKey];
-                        while (parent !== undefined && parent !== "root") {
-                            previewLayerMap[parent].visible = true;
-                            parent = parentMap[parent];
-                        }
-                        renderDoc = workingPreviewDoc.duplicate(
-                            "SCI_PS_LAYER_PREVIEW_" + previewNumber,
-                            false
-                        );
-                        savePng(renderDoc, filePath, cfg.preview_max_dimension);
-                        rows.push(encodeRecord([
-                            "PREVIEW", candidateKey, "PASS", filePath,
-                            "Isolated visible ArtLayer preview"
-                        ]));
-                    } catch (previewError) {
-                        rows.push(encodeRecord([
-                            "PREVIEW", candidateKey, "SKIP", "",
-                            clean(previewError.message)
-                        ]));
-                    } finally {
-                        if (renderDoc !== null) {
-                            try {
-                                renderDoc.close(SaveOptions.DONOTSAVECHANGES);
-                            } catch (renderCloseError) {}
-                        }
-                    }
-                }
-            } finally {
-                if (workingPreviewDoc !== null) {
-                    try {
-                        workingPreviewDoc.close(SaveOptions.DONOTSAVECHANGES);
-                    } catch (workingCloseError) {}
-                }
-            }
-        }
 
         doc.close(SaveOptions.DONOTSAVECHANGES);
         doc = null;
@@ -4110,7 +3928,6 @@ def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
         "document": None,
         "layers": [],
         "layer_count": 0,
-        "previews": [],
     }
 
     def number(value: str, default: Optional[float] = None) -> Optional[float]:
@@ -4140,15 +3957,6 @@ def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
                 "mode": values[5],
                 "color_profile": values[6],
             }
-        elif values[0] == "PREVIEW":
-            if len(values) != 5:
-                raise ValueError("Invalid PREVIEW inspection record: " + repr(values))
-            parsed["previews"].append({
-                "node_key": values[1],
-                "status": values[2],
-                "path": values[3] or None,
-                "description": values[4],
-            })
         elif values[0] == "LAYER":
             if len(values) != 25:
                 raise ValueError(
@@ -4231,9 +4039,6 @@ def inspect_psd(
     input_path: str | Path,
     *,
     report_path: Optional[str | Path] = None,
-    preview_dir: Optional[str | Path] = None,
-    preview_max_layers: int = 12,
-    preview_max_dimension: int = 1400,
     bridge: Optional[PhotoshopBridge] = None,
 ) -> Dict[str, Any]:
     """Inspect an existing PSD read-only and return its full ordered layer tree."""
@@ -4253,20 +4058,6 @@ def inspect_psd(
             )
         report_file.parent.mkdir(parents=True, exist_ok=True)
 
-    preview_folder: Optional[Path] = None
-    if preview_dir is not None:
-        preview_folder = Path(preview_dir).expanduser().resolve()
-        if preview_folder.exists():
-            raise FileExistsError(
-                "Preview directory already exists; choose a new path: "
-                + str(preview_folder)
-            )
-        if not isinstance(preview_max_layers, int) or not 0 <= preview_max_layers <= 200:
-            raise ValueError("preview_max_layers must be an integer between 0 and 200.")
-        if not isinstance(preview_max_dimension, int) or not 128 <= preview_max_dimension <= 4000:
-            raise ValueError("preview_max_dimension must be an integer between 128 and 4000.")
-        preview_folder.parent.mkdir(parents=True, exist_ok=True)
-
     source_hash_before = _sha256_file(source_file)
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
     token = uuid.uuid4().hex[:16]
@@ -4274,7 +4065,6 @@ def inspect_psd(
         "sci_insp_" + token + ".psd"
     )
     jsx = ""
-    preview_success = False
     try:
         # Inspect a byte-identical temporary copy so an already-open, unsaved
         # Photoshop document cannot silently change the on-disk inspection basis.
@@ -4289,9 +4079,6 @@ def inspect_psd(
         jsx = _build_inspect_psd_jsx({
             "input_path": str(temp_input),
             "document_label": source_file.name,
-            "preview_dir": str(preview_folder) if preview_folder is not None else "",
-            "preview_max_layers": preview_max_layers,
-            "preview_max_dimension": preview_max_dimension,
         })
         raw = active_bridge.execute_jsx(jsx)
         protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
@@ -4356,38 +4143,8 @@ def inspect_psd(
                 if layer["kind"] == "LayerKind.SMARTOBJECT"
             ),
             "layers": inspected["layers"],
-            "visual_previews": inspected["previews"],
-            "preview_dir": str(preview_folder) if preview_folder is not None else None,
             "source_sha256_unchanged": True,
         }
-
-        if preview_folder is not None:
-            composite = next(
-                (
-                    item for item in inspected["previews"]
-                    if item["node_key"] == "__composite__"
-                    and item["status"] == "PASS"
-                ),
-                None,
-            )
-            if composite is None or not composite["path"] or not Path(composite["path"]).is_file():
-                raise PhotoshopBridgeError(
-                    "inspect_psd",
-                    "Photoshop did not produce a valid composite visual preview.",
-                    exception_type="PreviewExportVerificationError",
-                    jsx_preview=_clean_jsx_preview(jsx),
-                )
-            for preview in inspected["previews"]:
-                if preview["status"] == "PASS" and (
-                    preview["path"] is None or not Path(preview["path"]).is_file()
-                ):
-                    raise PhotoshopBridgeError(
-                        "inspect_psd",
-                        "Photoshop reported a missing layer preview: "
-                        + str(preview["node_key"]),
-                        exception_type="PreviewExportVerificationError",
-                        jsx_preview=_clean_jsx_preview(jsx),
-                    )
 
         if report_file is not None:
             report["report_path"] = str(report_file)
@@ -4402,7 +4159,6 @@ def inspect_psd(
                 if temp_report.exists():
                     temp_report.unlink()
 
-        preview_success = True
         return report
     finally:
         try:
@@ -4410,15 +4166,6 @@ def inspect_psd(
                 temp_input.unlink()
         except OSError:
             pass
-        if preview_folder is not None and not preview_success:
-            try:
-                if preview_folder.exists():
-                    shutil.rmtree(preview_folder)
-            except OSError:
-                pass
-
-
-
 
 
 
@@ -5893,13 +5640,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON output path for --action inspect-psd.",
     )
     parser.add_argument(
-        "--preview-dir",
-        type=Path,
-        help="Optional new directory for composite and per-layer PNG previews during --action inspect-psd.",
-    )
-    parser.add_argument("--preview-max-layers", type=int, default=12)
-    parser.add_argument("--preview-max-dimension", type=int, default=1400)
-    parser.add_argument(
         "--organize-plan",
         type=Path,
         help="Approved structure-only JSON plan for --action apply-organize-plan.",
@@ -6161,9 +5901,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = inspect_psd(
                 args.input_psd,
                 report_path=args.inspection_report,
-                preview_dir=args.preview_dir,
-                preview_max_layers=args.preview_max_layers,
-                preview_max_dimension=args.preview_max_dimension,
                 bridge=bridge,
             )
         elif args.action == "preview-psd-layers":
