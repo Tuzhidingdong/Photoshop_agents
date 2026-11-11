@@ -4378,6 +4378,8 @@ def _validate_organize_plan(
                     raise ValueError("reorder_layer references must be siblings.")
                 if operation.get("position") not in ("before", "after"):
                     raise ValueError("reorder_layer.position must be 'before' or 'after'.")
+                if relative_layer["is_background"] and operation["position"] == "after":
+                    raise ValueError("A layer cannot be reordered below the locked Background layer.")
                 reordered.add(target)
 
             elif action == "set_visibility":
@@ -4518,6 +4520,24 @@ def _build_apply_organize_plan_jsx(config: Dict[str, Any]) -> str:
         }
         throw new Error("Destination group could not be resolved: " + key);
     }
+    function moveToEnd(layer, container) {
+        // Photoshop's locked Background layer must remain at the bottom.
+        // Place a new final sibling immediately above it instead of trying
+        // to move a layer below the Background.
+        if (container.typename === "Document") {
+            var layers = container.layers;
+            if (layers.length > 0) {
+                var bottom = layers[layers.length - 1];
+                try {
+                    if (bottom.isBackgroundLayer) {
+                        layer.move(bottom, ElementPlacement.PLACEBEFORE);
+                        return;
+                    }
+                } catch (backgroundError) {}
+            }
+        }
+        layer.move(container, ElementPlacement.PLACEATEND);
+    }
     function findNodeInfo(target, container, parentKey) {
         var collection = container.layers;
         for (var i = 0; i < collection.length; i++) {
@@ -4576,7 +4596,7 @@ def _build_apply_organize_plan_jsx(config: Dict[str, Any]) -> str:
             var parent = resolveContainer(create.parent, doc, sourceLayers, newGroups);
             var group = parent.layerSets.add();
             group.name = create.name;
-            group.move(parent, ElementPlacement.PLACEATEND);
+            moveToEnd(group, parent);
             newGroups[create.key] = group;
         }
 
@@ -4597,12 +4617,11 @@ def _build_apply_organize_plan_jsx(config: Dict[str, Any]) -> str:
             var destination = resolveContainer(
                 move.destination, doc, sourceLayers, newGroups
             );
-            target.move(
-                destination,
-                move.position === "start" ?
-                    ElementPlacement.PLACEATBEGINNING :
-                    ElementPlacement.PLACEATEND
-            );
+            if (move.position === "start") {
+                target.move(destination, ElementPlacement.PLACEATBEGINNING);
+            } else {
+                moveToEnd(target, destination);
+            }
         }
 
         for (var o = 0; o < cfg.operations.length; o++) {
