@@ -1361,7 +1361,7 @@ class PreviewPsdLayersTests(unittest.TestCase):
 
 
 
-def _make_valid_classification(inspection):
+def _make_valid_classification(inspection, use_visual_evidence=False):
     classifications = []
     for layer in inspection["layers"]:
         if layer["typename"] == "LayerSet":
@@ -1378,11 +1378,17 @@ def _make_valid_classification(inspection):
             }]
         elif layer["kind"] == "LayerKind.SMARTOBJECT":
             role = "panel_image"
-            evidence = [{
-                "type": "visual_preview",
-                "preview_node_key": layer["node_key"],
-                "observation": "The isolated preview shows the embedded panel image.",
-            }]
+            if use_visual_evidence:
+                evidence = [{
+                    "type": "visual_preview",
+                    "preview_node_key": layer["node_key"],
+                    "observation": "The isolated preview shows the embedded panel image.",
+                }]
+            else:
+                evidence = [{
+                    "type": "layer_type",
+                    "observation": layer["kind"],
+                }]
         else:
             role = "unknown"
             evidence = [{
@@ -1468,10 +1474,13 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         }
         preview_path = self.root / "preview_report.json"
         preview_path.write_text(json.dumps(preview_report), encoding="utf-8")
+        visual_classification = _make_valid_classification(
+            self.inspection, use_visual_evidence=True
+        )
         result = validate_psd_classification(
             self.input_psd,
             self.inspection_path,
-            self.classification_path,
+            visual_classification,
             preview_report=preview_path,
         )
         self.assertTrue(result["passed"])
@@ -1509,8 +1518,7 @@ class PsdSemanticClassificationTests(unittest.TestCase):
                 validate_psd_classification(self.input_psd, self.inspection_path, path)
 
     def test_visual_evidence_requires_a_successful_matching_preview(self):
-        item = json.loads(json.dumps(self.classification))
-        smart = next(x for x in item["classifications"] if x["role"] == "panel_image")
+        item = _make_valid_classification(self.inspection, use_visual_evidence=True)
         with self.assertRaisesRegex(ValueError, "no successful preview"):
             validate_psd_classification(
                 self.input_psd,
