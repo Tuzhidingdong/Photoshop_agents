@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs. Both Stage 8A inspection and Stage 8B Smart Object reparenting passed real Photoshop 2026 (27.9.1) integration tests; the source PSD hash remained unchanged.
+The implementation is staged and all seven stages have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs. Both Stage 8A inspection and Stage 8B Smart Object reparenting passed real Photoshop 2026 (27.9.1) integration tests; the source PSD hash remained unchanged. Stage 9A adds isolated layer/group PNG previews, a full-composite preview, and a labeled contact sheet for visual review; its real Photoshop verification is pending.
 
 ## Runtime requirements
 
@@ -233,7 +233,8 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 2. Stage 8 execution modes: `quiet` and `interactive` are implemented; unit coverage is included. `quiet` is not true headless execution.
 3. Stage 8A `inspect_psd`: implemented; returns a read-only, mixed-order layer tree and source integrity hashes. Real Photoshop 2026 integration passed against a 19-layer research figure (6 groups, 6 text layers, 4 Smart Objects).
 4. Stage 8B `apply_organize_plan`: implemented as an explicitly approved, structure-only plan executor operating on a temporary byte-identical PSD copy and saving to a new PSD. Real Photoshop 2026 integration passed by moving an embedded Smart Object into a new group, reopening the output, and verifying 20 layers, unchanged text/Smart Object counts, and unchanged source SHA-256.
-5. Stage 8C visual layer previews and content-grounded organization proposals: next design/implementation milestone; not yet implemented.
+5. Stage 9A `preview_psd_layers`: implemented; exports a composite preview and isolated previews of selected layers/groups from disposable copies, then builds a labeled contact sheet and JSON manifest. Real Photoshop integration verification is pending.
+6. Stage 9B content-grounded semantic classification and plan proposal: next milestone; the agent must use visual evidence and explicit user-supplied intent, mark uncertain roles as `unknown`, and never apply proposed operations without approval.
 
 ## Existing PSD inspection and organization
 
@@ -323,6 +324,41 @@ python scripts/ps_sci_toolkit.py --action apply-organize-plan `
 The CLI requires `--confirm-plan`. The API requires `approved=True`. The executor copies the source PSD to a temporary working file, applies only the approved structural operations, saves to a temporary PSD in the output directory, reopens and verifies the edited structure, then atomically moves the verified file to the requested output path. The original PSD is never saved or overwritten. Existing output files are protected unless `--overwrite` is explicit.
 
 Organizer v1 does not delete, merge, flatten, rasterize, resample, crop, transform, or alter pixel data. It cannot reconstruct independent layers from a flattened image. Clipping-mask moves are rejected because reparenting can change their rendering relationship. Unknown scientific meaning remains a human classification decision, not an automatic guess.
+
+## Existing PSD visual preview index
+
+After `inspect_psd` returns the ordered layer tree, use `preview_psd_layers` to understand the actual visual content before proposing structural changes.
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action preview-psd-layers `
+  --input-psd Figure_legacy.psd `
+  --preview-dir Figure_legacy_visual_index `
+  --preview-max-layers 24 `
+  --preview-width-px 512 `
+  --execution-mode quiet
+~~~
+
+The output directory must be new; existing directories are never overwritten. Outputs include:
+
+- `composite.png`: a downsampled, flattened preview of the entire source figure.
+- `layer_001.png`, ...: isolated previews of selected original layers or groups, generated from disposable duplicates. A group preview restores its children's original visibility. A clipped layer preview attempts to include its base layer.
+- `layer_contact_sheet.png`: a labeled grid with each node key, original layer name, and layer kind.
+- `preview_report.json`: source SHA-256, layer-tree fingerprint, node keys, original paths, per-preview status, and output metadata.
+
+By default, non-background layers and groups are selected in the original stack order. Use repeated `--preview-node-key` options to request a smaller, targeted set. The default maximum is 80, bounded by Photoshop memory and document complexity. Layer previews are visual aids, not an exact reconstruction of every blend/adjustment dependency: complex blend modes, clipping chains, masks, and adjustment layers may require contextual interpretation. The composite preview is the authoritative visual reference for the whole figure.
+
+Example selecting a group and two image layers:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action preview-psd-layers `
+  --input-psd Figure_legacy.psd `
+  --preview-dir Figure_legacy_selected_layers `
+  --preview-node-key root/G1 `
+  --preview-node-key root/G2/L0 `
+  --preview-node-key root/G3/L1
+~~~
+
+Only after reviewing the composite and layer contact sheet should the agent classify likely panels/images/text/legends/decorations. Classification must carry node keys, visual/text evidence, confidence, and `unknown` for uncertain purpose. It must not treat layer names alone as proof of scientific meaning.
 
 ## add_scale_bar: current implementation
 
@@ -501,8 +537,9 @@ python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5
 python tests/test_preflight_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --export-dir path\\to\\Figure_Grid_Stage5_FontsUnified_exports --export-basename Figure_Grid_Stage2_Stage3_Labeled_Stage4_ScaleBar_Stage5_FontsUnified
 python tests/test_inspect_psd_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 python tests/test_apply_organize_plan_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
+python tests/test_preview_psd_layers_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --preview-dir path\\to\\Figure_Grid_Stage8_Layer_Previews
 
-Both Stage 8A and Stage 8B integration demos passed on Photoshop 2026 (27.9.1). The inspected source PSD contained 19 layers, 6 groups, 6 text layers, and 4 Smart Objects. Stage 8B moved the embedded `Image_Panel_a` Smart Object into a new test group on a separate PSD copy; the output reopened with 20 layers and preserved the original 6 text layers and 4 Smart Objects. The original PSD SHA-256 remained unchanged.
+Both Stage 8A and Stage 8B integration demos passed on Photoshop 2026 (27.9.1). Stage 9A `preview_psd_layers` has a Windows integration demo and 68-test CI coverage; real Photoshop verification is pending. The inspected source PSD contained 19 layers, 6 groups, 6 text layers, and 4 Smart Objects. Stage 8B moved the embedded `Image_Panel_a` Smart Object into a new test group on a separate PSD copy; the output reopened with 20 layers and preserved the original 6 text layers and 4 Smart Objects. The original PSD SHA-256 remained unchanged.
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Each staged integration pass requires the generated PSD or export bundle to be reopened in Photoshop and its native document/layer structure or export metadata to be inspected. The Stage 7 integration pass additionally verifies that the inspected source PSD remains unchanged. Unit tests alone are not proof of Photoshop compatibility.
