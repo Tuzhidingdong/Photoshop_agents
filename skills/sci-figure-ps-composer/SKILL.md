@@ -340,7 +340,24 @@ Allowed roles:
 - `axis`, `axis_label`, `legend`, `title`, `annotation`
 - `decoration`, `background`, `test_artifact`, `unknown`
 
-Each record contains a confidence in [0, 1], a concise rationale, and at least one typed evidence item. Evidence types are `layer_name`, `layer_type`, `text_content`, `geometry`, `visual_preview`, `composite_context`, and `user_instruction`.
+Each record contains a confidence in [0, 1], a concise rationale, and at least one typed evidence item. Evidence types are `layer_name`, `layer_type`, `layer_metadata`, `text_content`, `geometry`, `visual_preview`, `composite_context`, and `user_instruction`.
+
+### Generate a classification work template
+
+After inspection and preview generation, create an evidence-indexed template before asking the vision-capable agent to classify nodes:
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action create-psd-classification-template `
+  --input-psd Figure_legacy.psd `
+  --inspection-report Figure_legacy_inspection.json `
+  --preview-report Figure_legacy_visual_index/preview_report.json `
+  --output Figure_legacy_classification_WORK_TEMPLATE.json `
+  --execution-mode quiet --json
+~~~
+
+The template includes every inspected node exactly once, the source/tree hashes, exact layer metadata, text and geometry facts, available evidence candidates, and the local isolated-preview file associated with each node. Its summary separately records total nodes, Photoshop Background layers, preview successes/failures, missing preview keys, and whether every non-background node has a successful isolated preview. The template generator does not modify the PSD and refuses stale inspection/preview hashes or missing referenced preview files.
+
+The template deliberately does not assign scientific roles based on layer names. Non-background nodes remain pending with `role: unknown`, no confidence, and no fabricated evidence until the agent actually reviews them. A Photoshop-native Background layer is the one exception: it can be recorded as structural role `background` with confidence 1.0, supported by exact `layer_metadata` evidence for `is_background: true`. The work template is not itself a valid classification report; the agent must complete the entries and produce a separate classification JSON before validation.
 
 ~~~json
 {
@@ -400,6 +417,8 @@ Evidence validation rules:
 
 - `layer_name` must quote the exact inspected layer name.
 - `layer_type` must match the inspected Photoshop kind or typename.
+- `layer_metadata` must contain exact, type-matching values from the inspected node (for example, `visible`, `opacity`, lock flags, clipping state, or `is_background`); unsupported fields are rejected.
+- A node marked by Photoshop as the native Background layer must use role `background`, supported by validated `layer_metadata` evidence with `is_background: true`. The role cannot be assigned to an ordinary layer merely by naming it “Background”.
 - `text_content` must quote text actually present in a native text layer.
 - `geometry` must include the exact inspected `bounds_px` array.
 - `visual_preview` must refer to a successful isolated preview for the same node key.
