@@ -1744,6 +1744,7 @@ class PsdSemanticClassificationTests(unittest.TestCase):
 
     def test_finalize_reviewed_classification_template_writes_valid_report(self):
         template_path, template = self._make_reviewed_template_with_full_previews()
+        template_bytes_before = template_path.read_bytes()
         output = self.root / "final_classification.json"
 
         result = finalize_psd_classification_template(template_path, output)
@@ -1761,10 +1762,7 @@ class PsdSemanticClassificationTests(unittest.TestCase):
             report["source_sha256"],
             template["source_sha256"],
         )
-        self.assertEqual(
-            template_path.read_text(encoding="utf-8"),
-            template_path.read_text(encoding="utf-8"),
-        )
+        self.assertEqual(template_path.read_bytes(), template_bytes_before)
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
 
     def test_finalize_rejects_unreviewed_nodes_and_missing_visual_evidence(self):
