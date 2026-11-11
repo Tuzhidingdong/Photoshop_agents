@@ -2494,12 +2494,16 @@ def export_figure(
         )
 
     token = uuid.uuid4().hex
-    psd_temp = export_dir / ("." + export_basename + "." + token + ".tmp.psd")
-    tiff_temp = export_dir / ("." + export_basename + "." + token + ".tmp.tif")
-    png_temp = export_dir / ("." + export_basename + "." + token + ".tmp.png")
+    # Keep transient paths short: duplicating a long scientific figure basename
+    # here can exceed Windows MAX_PATH even when the final published names fit.
+    psd_temp = export_dir / (".sci_ps_" + token + ".tmp.psd")
+    tiff_temp = export_dir / (".sci_tif_" + token + ".tmp.tif")
+    png_temp = export_dir / (".sci_png_" + token + ".tmp.png")
 
     input_hash_before = _sha256_file(source_file)
     temp_paths = (psd_temp, tiff_temp, png_temp)
+    phase = "create_editable_psd_staging_copy"
+    jsx_preview: Optional[str] = None
 
     try:
         shutil.copy2(source_file, psd_temp)
@@ -2521,6 +2525,8 @@ def export_figure(
 
         active_bridge = bridge if bridge is not None else PhotoshopBridge()
         jsx = _build_export_figure_jsx(config)
+        jsx_preview = _clean_jsx_preview(jsx)
+        phase = "photoshop_native_tiff_png_export"
         raw = active_bridge.execute_jsx(jsx)
         fields = _parse_protocol(
             raw,
@@ -2548,12 +2554,14 @@ def export_figure(
                 jsx_preview=_clean_jsx_preview(jsx),
             )
 
+        phase = "inspect_tiff_metadata"
         tiff_metadata = _inspect_export_raster(
             tiff_temp,
             expected_format="TIFF",
             expected_size=(width_px, height_px),
             expected_dpi=actual_dpi,
         )
+        phase = "inspect_png_metadata"
         png_metadata = _inspect_export_raster(
             png_temp,
             expected_format="PNG",
@@ -2572,8 +2580,11 @@ def export_figure(
         # Publish the bundle only after all three deliverables and both raster
         # metadata checks have succeeded. os.replace keeps each final path
         # from ever pointing at a partial write.
+        phase = "publish_editable_psd"
         os.replace(psd_temp, psd_output)
+        phase = "publish_tiff"
         os.replace(tiff_temp, tiff_output)
+        phase = "publish_png"
         os.replace(png_temp, png_output)
 
         psd_hash = _sha256_file(psd_output)
@@ -2611,6 +2622,13 @@ def export_figure(
             "input_sha256_unchanged": True,
             "passed": True,
         }
+    except OSError as exc:
+        raise PhotoshopBridgeError(
+            "export_figure",
+            "Filesystem failure during " + phase + ": " + str(exc),
+            exception_type=type(exc).__name__,
+            jsx_preview=jsx_preview,
+        ) from exc
     finally:
         for temp_path in temp_paths:
             try:
