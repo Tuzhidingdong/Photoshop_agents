@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization has passed the nested-group Photoshop save/reopen test. The Stage 6 PSD/TIFF/PNG publication export is implemented and covered by unit tests; its real Photoshop export and metadata verification is the current integration check. Publication preflight remains on the roadmap.
+The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization has passed the nested-group Photoshop save/reopen test. The Stage 6 PSD/TIFF/PNG publication export is implemented and covered by unit tests; its real Photoshop export and metadata verification is the current integration check. Temporary export paths use short UUID-based names to remain within Windows legacy path limits. Publication preflight remains on the roadmap.
 
 ## Runtime requirements
 
@@ -282,7 +282,7 @@ The bundle contains:
 
 The TIFF and PNG are created from two independent duplicates of the source document. Only those duplicates are flattened; the input PSD is never flattened or saved. Canvas dimensions are not resampled and source resolution must be 300 or 600 DPI. An optional `expected_dpi` checks the requested value without changing resolution.
 
-Before publishing the output bundle, Photoshop reopens all three staged files and checks their dimensions, RGB mode, and resolution. Python then reads TIFF/PNG metadata only: RGB mode, pixel dimensions, DPI, and TIFF compression tag 259 (value 5 = LZW). It does not re-encode the images. Output files are staged under temporary names and moved into their final paths only after export and metadata checks succeed; the source PSD's SHA-256 must remain unchanged.
+Before publishing the output bundle, Photoshop reopens all three staged files and checks their dimensions, RGB mode, and resolution. Python then reads TIFF/PNG metadata only: RGB mode, pixel dimensions, DPI, and TIFF compression tag 259 (value 5 = LZW). It does not re-encode the images. Output files are staged under short UUID-based temporary names in the export directory (the staging names deliberately do not repeat the potentially long scientific figure basename) and moved into their final paths only after export and metadata checks succeed. Filesystem failures identify the current export phase. The source PSD's SHA-256 must remain unchanged.
 
 The CLI options are `--unify-font-postscript`, `--unify-font-size-pt`, and `--unify-font-color`; specify at least one. The real Photoshop demo deliberately inserts a text layer two groups deep before normalization to prove the recursive traversal, then reopens the result to check every text layer.
 Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
