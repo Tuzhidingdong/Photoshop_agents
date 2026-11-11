@@ -863,7 +863,7 @@ class ExportFigureUnitTests(unittest.TestCase):
         self.assertTrue(Path(config["psd_temp_path"]).name.startswith(".sci_ps_"))
         self.assertTrue(Path(config["tiff_temp_path"]).name.startswith(".sci_tif_"))
         self.assertTrue(Path(config["png_temp_path"]).name.startswith(".sci_png_"))
-        self.assertLess(len(config["psd_temp_path"]), len(str(self.output_dir / "Figure_1.psd")))
+        self.assertLess(len(Path(config["psd_temp_path"]).name), 64)
         self.assertIn("TIFFEncoding.TIFFLZW", jsx)
         self.assertIn("new TiffSaveOptions()", jsx)
         self.assertIn("new PNGSaveOptions()", jsx)
