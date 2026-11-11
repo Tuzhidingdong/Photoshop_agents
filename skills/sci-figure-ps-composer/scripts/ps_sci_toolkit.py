@@ -5621,6 +5621,399 @@ def apply_organize_plan(
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 9B: evidence-grounded semantic classifications and plan drafts
+# ---------------------------------------------------------------------------
+
+PSD_SEMANTIC_ROLES = (
+    "panel_group",
+    "panel_image",
+    "panel_label",
+    "scale_bar",
+    "scale_label",
+    "axis",
+    "axis_label",
+    "legend",
+    "title",
+    "annotation",
+    "decoration",
+    "background",
+    "test_artifact",
+    "unknown",
+)
+
+PSD_CLASSIFICATION_EVIDENCE_TYPES = (
+    "layer_name",
+    "layer_type",
+    "text_content",
+    "geometry",
+    "visual_preview",
+    "composite_context",
+    "user_instruction",
+)
+
+
+def _load_json_object(
+    value: Dict[str, Any] | str | Path,
+    field: str,
+) -> tuple[Dict[str, Any], Optional[Path]]:
+    if isinstance(value, (str, Path)):
+        path = Path(value).expanduser().resolve(strict=True)
+        if not path.is_file() or path.suffix.lower() != ".json":
+            raise ValueError(field + " must be an existing JSON file.")
+        loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(loaded, dict):
+            raise ValueError(field + " must contain a JSON object.")
+        return loaded, path
+    if not isinstance(value, dict):
+        raise ValueError(field + " must be a dictionary or JSON path.")
+    loaded = json.loads(json.dumps(value, ensure_ascii=False))
+    return loaded, None
+
+
+def _validate_classification_report(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    classification_report: Dict[str, Any] | str | Path,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Validate semantic labels against a specific PSD tree and evidence index."""
+    source_file = Path(input_psd).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_psd must be an existing PSD file.")
+
+    inspection, inspection_path = _load_json_object(
+        inspection_report, "inspection_report"
+    )
+    classification, classification_path = _load_json_object(
+        classification_report, "classification_report"
+    )
+
+    if inspection.get("schema_version") != 1 or inspection.get("passed") is not True:
+        raise ValueError("inspection_report must be a successful schema_version 1 report.")
+    if classification.get("schema_version") != 1:
+        raise ValueError("classification_report schema_version must be 1.")
+    if classification.get("source_sha256") != inspection.get("source_sha256"):
+        raise ValueError("Classification source_sha256 does not match inspection report.")
+    if classification.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+        raise ValueError("Classification layer_tree_sha256 does not match inspection report.")
+
+    source_hash = _sha256_file(source_file)
+    if source_hash != inspection.get("source_sha256"):
+        raise ValueError(
+            "The current PSD does not match the inspection report source_sha256; re-inspect it."
+        )
+
+    raw_layers = inspection.get("layers")
+    if not isinstance(raw_layers, list) or not raw_layers:
+        raise ValueError("inspection_report must contain a non-empty layers array.")
+    layer_by_key: Dict[str, Dict[str, Any]] = {}
+    for layer in raw_layers:
+        if not isinstance(layer, dict) or not isinstance(layer.get("node_key"), str):
+            raise ValueError("inspection_report contains a malformed layer entry.")
+        key = layer["node_key"]
+        if key in layer_by_key:
+            raise ValueError("inspection_report contains duplicate node_key: " + key)
+        layer_by_key[key] = layer
+
+    available_previews: Dict[str, Dict[str, Any]] = {}
+    preview_manifest: Optional[Dict[str, Any]] = None
+    preview_path: Optional[Path] = None
+    if preview_report is not None:
+        preview_manifest, preview_path = _load_json_object(
+            preview_report, "preview_report"
+        )
+        if preview_manifest.get("source_sha256") != inspection.get("source_sha256"):
+            raise ValueError("Preview report source_sha256 does not match inspection report.")
+        if preview_manifest.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+            raise ValueError("Preview report layer_tree_sha256 does not match inspection report.")
+        preview_items = preview_manifest.get("previews")
+        if not isinstance(preview_items, list):
+            raise ValueError("preview_report must contain a previews array.")
+        for item in preview_items:
+            if not isinstance(item, dict) or not isinstance(item.get("node_key"), str):
+                raise ValueError("preview_report contains a malformed preview entry.")
+            if item["node_key"] in available_previews:
+                raise ValueError("preview_report contains duplicate node_key: " + item["node_key"])
+            available_previews[item["node_key"]] = item
+        if preview_path is not None:
+            preview_root = preview_path.parent
+        else:
+            preview_root = Path(str(preview_manifest.get("preview_dir", ""))).expanduser()
+        for item in preview_items:
+            if item.get("status") != "OK":
+                continue
+            filename = item.get("file_name")
+            if not isinstance(filename, str) or not filename:
+                raise ValueError("Successful preview entry is missing file_name.")
+            preview_file = (preview_root / filename).resolve()
+            try:
+                preview_file.relative_to(preview_root.resolve())
+            except ValueError as exc:
+                raise ValueError("Preview file path escapes the preview directory.") from exc
+            if not preview_file.is_file() or preview_file.stat().st_size <= 0:
+                raise ValueError("Preview file is missing or empty: " + str(preview_file))
+
+        contact = preview_manifest.get("contact_sheet")
+        if isinstance(contact, dict) and contact.get("path"):
+            contact_file = Path(contact["path"]).expanduser().resolve()
+            if not contact_file.is_file() or contact_file.stat().st_size <= 0:
+                raise ValueError("Preview contact sheet is missing or empty.")
+        composite_value = preview_manifest.get("composite_preview")
+        if composite_value:
+            composite_file = Path(composite_value).expanduser().resolve()
+            if not composite_file.is_file() or composite_file.stat().st_size <= 0:
+                raise ValueError("Composite preview is missing or empty.")
+
+    classifications = classification.get("classifications")
+    if not isinstance(classifications, list):
+        raise ValueError("classification_report must contain a classifications array.")
+
+    seen: set[str] = set()
+    normalized: list[Dict[str, Any]] = []
+    warnings: list[str] = []
+    role_counts: Dict[str, int] = {}
+    for index, item in enumerate(classifications):
+        if not isinstance(item, dict):
+            raise ValueError("Classification entry " + str(index) + " must be an object.")
+        key = item.get("node_key")
+        if not isinstance(key, str) or key not in layer_by_key:
+            raise ValueError("Classification references an unknown node_key: " + str(key))
+        if key in seen:
+            raise ValueError("Duplicate classification node_key: " + key)
+        seen.add(key)
+
+        role = item.get("role")
+        if role not in PSD_SEMANTIC_ROLES:
+            raise ValueError(
+                "Unsupported semantic role for " + key + ": " + str(role)
+            )
+        confidence = item.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValueError("Classification confidence must be a finite number in [0, 1]: " + key)
+
+        rationale = item.get("rationale")
+        if not isinstance(rationale, str) or len(rationale.strip()) < 8:
+            raise ValueError("Classification rationale must contain at least 8 characters: " + key)
+
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("Every classification requires at least one evidence item: " + key)
+        normalized_evidence: list[Dict[str, Any]] = []
+        has_visual_evidence = False
+        for evidence_index, evidence_item in enumerate(evidence):
+            if not isinstance(evidence_item, dict):
+                raise ValueError("Evidence item must be an object: " + key)
+            evidence_type = evidence_item.get("type")
+            if evidence_type not in PSD_CLASSIFICATION_EVIDENCE_TYPES:
+                raise ValueError(
+                    "Unsupported evidence type for " + key + ": " + str(evidence_type)
+                )
+            observation = evidence_item.get("observation")
+            if not isinstance(observation, str) or len(observation.strip()) < 3:
+                raise ValueError("Evidence observation is too short: " + key)
+            normalized_item = {
+                "type": evidence_type,
+                "observation": observation.strip(),
+            }
+            if evidence_type == "visual_preview":
+                preview_key = evidence_item.get("preview_node_key", key)
+                if preview_key != key:
+                    raise ValueError(
+                        "visual_preview evidence must cite the same node_key: " + key
+                    )
+                preview = available_previews.get(key)
+                if preview_report is None or preview is None or preview.get("status") != "OK":
+                    raise ValueError(
+                        "visual_preview evidence has no successful preview for " + key
+                    )
+                normalized_item["preview_node_key"] = key
+                normalized_item["preview_file"] = preview["file_name"]
+                has_visual_evidence = True
+            elif evidence_type == "composite_context":
+                if preview_manifest is None:
+                    raise ValueError(
+                        "composite_context evidence requires a preview_report: " + key
+                    )
+                if not preview_manifest.get("composite_preview"):
+                    raise ValueError("Preview report has no composite preview.")
+                normalized_item["preview_file"] = "composite.png"
+                has_visual_evidence = True
+            elif evidence_type == "text_content":
+                layer_text = layer_by_key[key].get("text")
+                if not isinstance(layer_text, dict) or not layer_text.get("contents"):
+                    raise ValueError(
+                        "text_content evidence requires a native text layer with readable contents: "
+                        + key
+                    )
+                normalized_item["observed_text"] = layer_text["contents"]
+            elif evidence_type == "user_instruction":
+                source = evidence_item.get("source")
+                if source != "user":
+                    raise ValueError(
+                        "user_instruction evidence must set source='user': " + key
+                    )
+                normalized_item["source"] = "user"
+            normalized_evidence.append(normalized_item)
+
+        if role != "unknown" and float(confidence) < 0.45:
+            warnings.append(
+                key + " is classified as " + role
+                + " with low confidence; consider role='unknown'."
+            )
+        if role in ("panel_image", "legend", "axis", "decoration") and not has_visual_evidence:
+            warnings.append(
+                key + " uses a visual semantic role without visual evidence."
+            )
+
+        role_counts[role] = role_counts.get(role, 0) + 1
+        normalized.append({
+            "node_key": key,
+            "path": layer_by_key[key]["path"],
+            "name": layer_by_key[key]["name"],
+            "kind": layer_by_key[key]["kind"],
+            "role": role,
+            "confidence": float(confidence),
+            "rationale": rationale.strip(),
+            "evidence": normalized_evidence,
+        })
+
+    missing = sorted(set(layer_by_key) - seen)
+    if missing:
+        raise ValueError(
+            "Classification report must account for every inspected node; missing: "
+            + ", ".join(missing)
+        )
+
+    classification_digest = hashlib.sha256(
+        json.dumps(classification, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if classification_path is not None:
+        classification_digest = _sha256_file(classification_path)
+
+    return {
+        "schema_version": 1,
+        "passed": True,
+        "input_psd": str(source_file),
+        "source_sha256": source_hash,
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "inspection_report": str(inspection_path) if inspection_path else None,
+        "preview_report": str(preview_path) if preview_path else None,
+        "classification_report": str(classification_path) if classification_path else None,
+        "classification_sha256": classification_digest,
+        "layer_count": len(layer_by_key),
+        "classified_count": len(normalized),
+        "role_counts": role_counts,
+        "warnings": warnings,
+        "classifications": normalized,
+    }
+
+
+def validate_psd_classification(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    classification_report: Dict[str, Any] | str | Path,
+    *,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Validate a model-authored semantic classification without editing the PSD."""
+    return _validate_classification_report(
+        input_psd,
+        inspection_report,
+        classification_report,
+        preview_report,
+    )
+
+
+def create_organize_plan_draft(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    classification_report: Dict[str, Any] | str | Path,
+    operations: list[Dict[str, Any]] | str | Path,
+    output_path: str | Path,
+    *,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Create an unapproved organizer plan after validating classification and operations."""
+    validation = validate_psd_classification(
+        input_psd,
+        inspection_report,
+        classification_report,
+        preview_report=preview_report,
+    )
+    if isinstance(operations, (str, Path)):
+        operations_path = Path(operations).expanduser().resolve(strict=True)
+        if not operations_path.is_file() or operations_path.suffix.lower() != ".json":
+            raise ValueError("operations must be an existing JSON file.")
+        raw_operations = json.loads(operations_path.read_text(encoding="utf-8-sig"))
+    else:
+        raw_operations = operations
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise ValueError("operations must be a non-empty JSON array.")
+
+    inspection, _ = _load_json_object(inspection_report, "inspection_report")
+    proposed_plan = {
+        "schema_version": 1,
+        "source_sha256": validation["source_sha256"],
+        "layer_tree_sha256": validation["layer_tree_sha256"],
+        "operations": raw_operations,
+    }
+    normalized = _validate_organize_plan(proposed_plan, inspection)
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".json":
+        raise ValueError("output_path must end in .json.")
+    if output_file.exists():
+        raise FileExistsError(
+            "Organizer plan draft already exists; choose another path: "
+            + str(output_file)
+        )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    role_counts = validation["role_counts"]
+    draft = {
+        "schema_version": 1,
+        "plan_type": "user_review_required",
+        "requires_user_approval": True,
+        "approved": False,
+        "source_psd": validation["input_psd"],
+        "source_sha256": validation["source_sha256"],
+        "layer_tree_sha256": validation["layer_tree_sha256"],
+        "classification_sha256": validation["classification_sha256"],
+        "classification_role_counts": role_counts,
+        "classification_warnings": validation["warnings"],
+        "operations": normalized["operations"],
+        "verify_refs": normalized["verify_refs"],
+    }
+    serialized = json.dumps(draft, ensure_ascii=False, indent=2)
+    temp_file = output_file.with_name(output_file.stem + ".tmp" + output_file.suffix)
+    try:
+        temp_file.write_text(serialized, encoding="utf-8")
+        os.replace(temp_file, output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return {
+        "passed": True,
+        "requires_user_approval": True,
+        "approved": False,
+        "output_path": str(output_file),
+        "operation_count": len(normalized["operations"]),
+        "role_counts": role_counts,
+        "warnings": validation["warnings"],
+        "plan_sha256": _sha256_file(output_file),
+        "plan": draft,
+    }
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
