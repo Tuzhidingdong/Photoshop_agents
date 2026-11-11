@@ -4171,6 +4171,535 @@ def inspect_psd(
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 9A: visual layer previews for existing PSDs
+# ---------------------------------------------------------------------------
+
+
+def _build_preview_psd_layers_jsx(config: Dict[str, Any]) -> str:
+    """Build JSX that exports isolated layer/group previews from a temporary PSD copy."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(
+                values[i] === undefined || values[i] === null ? "" : String(values[i])
+            ));
+        }
+        return encoded.join("|");
+    }
+    function safeVisible(layer) {
+        try {
+            return Boolean(layer.visible);
+        } catch (e) {
+            return true;
+        }
+    }
+    function walk(container, parentKey, map, containers) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            var isGroup = layer.typename === "LayerSet";
+            var key = parentKey + "/" + (isGroup ? "G" : "L") + i;
+            map[key] = layer;
+            if (isGroup) {
+                containers[key] = layer;
+                walk(layer, key, map, containers);
+            }
+        }
+    }
+    function hideAll(container) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            try {
+                layer.visible = false;
+            } catch (hideError) {}
+            if (layer.typename === "LayerSet") {
+                hideAll(layer);
+            }
+        }
+    }
+    function restoreGroupChildren(sourceGroup, previewGroup) {
+        var sourceLayers = sourceGroup.layers;
+        var previewLayers = previewGroup.layers;
+        if (sourceLayers.length !== previewLayers.length) {
+            throw new Error("Layer group changed while creating its preview.");
+        }
+        for (var i = 0; i < sourceLayers.length; i++) {
+            var sourceLayer = sourceLayers[i];
+            var previewLayer = previewLayers[i];
+            previewLayer.visible = safeVisible(sourceLayer);
+            if (sourceLayer.typename === "LayerSet") {
+                restoreGroupChildren(sourceLayer, previewLayer);
+            }
+        }
+    }
+    function setAncestorsVisible(item, layerMap) {
+        var parentKey = item.node_key.substring(0, item.node_key.lastIndexOf("/"));
+        while (parentKey !== "root") {
+            if (layerMap[parentKey] === undefined) {
+                throw new Error("Missing preview ancestor: " + parentKey);
+            }
+            layerMap[parentKey].visible = true;
+            parentKey = parentKey.substring(0, parentKey.lastIndexOf("/"));
+        }
+    }
+    function safeClose(doc) {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (e) {}
+        }
+    }
+
+    var cfg = __SCI_PREVIEW_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousRulerUnits = app.preferences.rulerUnits;
+    var previousTypeUnits = app.preferences.typeUnits;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var sourceDoc = null;
+    var rows = [];
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var inputFile = new File(cfg.input_path);
+        if (!inputFile.exists) {
+            throw new Error("Temporary preview PSD is missing: " + cfg.input_path);
+        }
+        sourceDoc = app.open(inputFile);
+
+        var originalMap = {};
+        var originalContainers = {};
+        walk(sourceDoc, "root", originalMap, originalContainers);
+
+        for (var p = 0; p < cfg.items.length; p++) {
+            var item = cfg.items[p];
+            var previewDoc = null;
+            try {
+                if (originalMap[item.node_key] === undefined) {
+                    throw new Error("Layer key not found in temporary PSD: " + item.node_key);
+                }
+                var sourceLayer = originalMap[item.node_key];
+                var previewFile = new File(cfg.output_dir + "/" + item.file_name);
+                if (previewFile.exists) {
+                    throw new Error("Preview output already exists: " + item.file_name);
+                }
+
+                previewDoc = sourceDoc.duplicate(
+                    "SCI_Layer_Preview_" + item.sequence,
+                    false
+                );
+
+                var previewMap = {};
+                var previewContainers = {};
+                walk(previewDoc, "root", previewMap, previewContainers);
+                hideAll(previewDoc);
+
+                var previewLayer = previewMap[item.node_key];
+                if (previewLayer === undefined) {
+                    throw new Error("Layer key not found in duplicate PSD: " + item.node_key);
+                }
+
+                setAncestorsVisible(item, previewMap);
+                if (previewLayer.typename === "LayerSet") {
+                    previewLayer.visible = true;
+                    restoreGroupChildren(sourceLayer, previewLayer);
+                } else {
+                    previewLayer.visible = true;
+                    var isClipped = false;
+                    try {
+                        isClipped = Boolean(sourceLayer.grouped);
+                    } catch (clipError) {}
+                    if (isClipped) {
+                        var parentKey = item.node_key.substring(
+                            0, item.node_key.lastIndexOf("/")
+                        );
+                        var parentContainer = parentKey === "root" ?
+                            previewDoc : previewContainers[parentKey];
+                        var siblings = parentContainer.layers;
+                        var baseIndex = item.stack_index + 1;
+                        if (baseIndex < siblings.length) {
+                            siblings[baseIndex].visible = true;
+                        }
+                    }
+                }
+
+                // Preserve aspect ratio and downsample only the disposable preview copy.
+                var originalWidth = previewDoc.width.as("px");
+                var originalHeight = previewDoc.height.as("px");
+                var targetWidth = Math.min(cfg.thumbnail_width_px, originalWidth);
+                var targetHeight = Math.max(
+                    1,
+                    Math.round(originalHeight * targetWidth / originalWidth)
+                );
+                if (targetWidth !== originalWidth || targetHeight !== originalHeight) {
+                    previewDoc.resizeImage(
+                        UnitValue(targetWidth, "px"),
+                        UnitValue(targetHeight, "px"),
+                        previewDoc.resolution,
+                        ResampleMethod.BICUBICSHARPER
+                    );
+                }
+
+                var pngOptions = new PNGSaveOptions();
+                pngOptions.interlaced = false;
+                previewDoc.saveAs(previewFile, pngOptions, true, Extension.LOWERCASE);
+                if (!previewFile.exists || previewFile.length <= 0) {
+                    throw new Error("Photoshop did not create the preview PNG.");
+                }
+
+                rows.push(encodeRecord([
+                    "PREVIEW",
+                    item.node_key,
+                    item.file_name,
+                    "OK",
+                    targetWidth,
+                    targetHeight,
+                    ""
+                ]));
+            } catch (previewError) {
+                rows.push(encodeRecord([
+                    "PREVIEW",
+                    item.node_key,
+                    item.file_name,
+                    "ERROR",
+                    "",
+                    "",
+                    clean(previewError.message)
+                ]));
+            } finally {
+                safeClose(previewDoc);
+            }
+        }
+
+        sourceDoc.close(SaveOptions.DONOTSAVECHANGES);
+        sourceDoc = null;
+        return [
+            "SCI_PS_PREVIEW_PSD",
+            "OK",
+            String(cfg.items.length),
+            rows.join("\n")
+        ].join("\t");
+    } catch (e) {
+        return [
+            "SCI_PS_PREVIEW_PSD",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        safeClose(sourceDoc);
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreDocError) {}
+        }
+        try {
+            app.preferences.rulerUnits = previousRulerUnits;
+        } catch (restoreRulerError) {}
+        try {
+            app.preferences.typeUnits = previousTypeUnits;
+        } catch (restoreTypeError) {}
+        app.displayDialogs = previousDialogs;
+    }
+})();
+"""
+    return template.replace("__SCI_PREVIEW_CONFIG__", payload)
+
+
+def _parse_psd_preview_records(encoded_records: str) -> list[Dict[str, Any]]:
+    previews: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if len(values) != 7 or values[0] != "PREVIEW":
+            raise ValueError("Invalid PSD preview record: " + repr(values))
+        if values[1] in seen:
+            raise ValueError("Duplicate PSD preview node key: " + values[1])
+        if values[3] not in ("OK", "ERROR"):
+            raise ValueError("Unknown PSD preview status: " + values[3])
+        seen.add(values[1])
+        previews.append({
+            "node_key": values[1],
+            "file_name": values[2],
+            "status": values[3],
+            "width_px": int(float(values[4])) if values[4] else None,
+            "height_px": int(float(values[5])) if values[5] else None,
+            "error": values[6] or None,
+        })
+    return previews
+
+
+def _build_layer_preview_contact_sheet(
+    previews: list[Dict[str, Any]],
+    output_path: Path,
+    *,
+    columns: int = 3,
+) -> Dict[str, Any]:
+    """Build a labeled visual contact sheet from Photoshop-generated layer PNGs."""
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+    card_width = 320
+    card_height = 235
+    image_height = 180
+    rows = max(1, (len(previews) + columns - 1) // columns)
+    sheet = Image.new(
+        "RGB",
+        (columns * card_width, rows * card_height),
+        (238, 240, 243),
+    )
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default()
+    successful = 0
+
+    for index, preview in enumerate(previews):
+        x = (index % columns) * card_width
+        y = (index // columns) * card_height
+        draw.rectangle(
+            (x + 4, y + 4, x + card_width - 4, y + card_height - 4),
+            fill=(255, 255, 255),
+            outline=(190, 195, 202),
+            width=1,
+        )
+
+        if preview["status"] == "OK":
+            preview_file = output_path.parent / preview["file_name"]
+            with Image.open(preview_file) as opened:
+                image = opened.convert("RGBA")
+                image.thumbnail((card_width - 20, image_height - 16))
+                background = Image.new(
+                    "RGBA", (card_width - 20, image_height - 16), (250, 250, 250, 255)
+                )
+                left = (background.width - image.width) // 2
+                top = (background.height - image.height) // 2
+                background.alpha_composite(image, (left, top))
+                sheet.paste(background.convert("RGB"), (x + 10, y + 10))
+            successful += 1
+        else:
+            draw.text(
+                (x + 14, y + 18),
+                "Preview unavailable",
+                fill=(150, 45, 45),
+                font=font,
+            )
+            draw.text(
+                (x + 14, y + 42),
+                str(preview.get("error") or "Unknown error")[:58],
+                fill=(100, 45, 45),
+                font=font,
+            )
+
+        label = str(preview["node_key"])
+        draw.text(
+            (x + 10, y + image_height + 7),
+            label[:48],
+            fill=(20, 25, 32),
+            font=font,
+        )
+        draw.text(
+            (x + 10, y + image_height + 24),
+            str(preview["name"])[:42] + "  [" + str(preview["kind"]) + "]",
+            fill=(70, 75, 82),
+            font=font,
+        )
+
+    sheet.save(output_path, format="PNG", optimize=True)
+    return {
+        "path": str(output_path),
+        "columns": columns,
+        "rows": rows,
+        "card_width_px": card_width,
+        "card_height_px": card_height,
+        "successful_previews": successful,
+        "total_previews": len(previews),
+    }
+
+
+def preview_psd_layers(
+    input_path: str | Path,
+    output_dir: str | Path,
+    *,
+    node_keys: Optional[list[str]] = None,
+    max_previews: int = 80,
+    thumbnail_width_px: int = 512,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Create isolated previews of PSD layers/groups on disposable copies only."""
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    if not 1 <= int(max_previews) <= 200:
+        raise ValueError("max_previews must be between 1 and 200.")
+    if not 64 <= int(thumbnail_width_px) <= 2048:
+        raise ValueError("thumbnail_width_px must be between 64 and 2048.")
+
+    preview_folder = Path(output_dir).expanduser().resolve()
+    if preview_folder.exists():
+        raise FileExistsError(
+            "Preview output directory already exists; choose a new directory: "
+            + str(preview_folder)
+        )
+    preview_folder.parent.mkdir(parents=True, exist_ok=True)
+    preview_folder.mkdir(parents=False, exist_ok=False)
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    inspection = inspect_psd(source_file, bridge=active_bridge)
+    layer_by_key = {layer["node_key"]: layer for layer in inspection["layers"]}
+
+    if node_keys is None:
+        selected_layers = [
+            layer for layer in inspection["layers"]
+            if not layer["is_background"]
+        ]
+    else:
+        if not node_keys:
+            raise ValueError("node_keys cannot be an empty list.")
+        if len(node_keys) != len(set(node_keys)):
+            raise ValueError("node_keys must not contain duplicates.")
+        unknown = [key for key in node_keys if key not in layer_by_key]
+        if unknown:
+            raise ValueError("Unknown PSD node_keys: " + ", ".join(unknown))
+        selected_layers = [layer_by_key[key] for key in node_keys]
+
+    if len(selected_layers) > max_previews:
+        raise ValueError(
+            "PSD has " + str(len(selected_layers)) + " selected layers/groups; "
+            + "max_previews is " + str(max_previews)
+            + ". Select node_keys or raise max_previews."
+        )
+
+    skipped_backgrounds = [
+        layer["node_key"] for layer in selected_layers if layer["is_background"]
+    ]
+    selected_layers = [
+        layer for layer in selected_layers if not layer["is_background"]
+    ]
+    if not selected_layers:
+        raise ValueError("No previewable non-background layers/groups were selected.")
+
+    source_hash_before = _sha256_file(source_file)
+    token = uuid.uuid4().hex[:16]
+    temp_input = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / (
+        "sci_prev_" + token + ".psd"
+    )
+    items = [
+        {
+            "sequence": index + 1,
+            "node_key": layer["node_key"],
+            "stack_index": layer["stack_index"],
+            "file_name": "layer_" + str(index + 1).zfill(3) + ".png",
+        }
+        for index, layer in enumerate(selected_layers)
+    ]
+    jsx = ""
+    try:
+        shutil.copy2(source_file, temp_input)
+        if _sha256_file(temp_input) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Temporary preview copy is not byte-identical to the source PSD.",
+                exception_type="WorkingCopyIntegrityError",
+            )
+
+        jsx = _build_preview_psd_layers_jsx({
+            "input_path": str(temp_input),
+            "output_dir": str(preview_folder),
+            "thumbnail_width_px": int(thumbnail_width_px),
+            "items": items,
+        })
+        raw = active_bridge.execute_jsx(jsx)
+        protocol = _parse_protocol(
+            raw, "SCI_PS_PREVIEW_PSD", 4, "preview_psd_layers", jsx
+        )
+        if int(protocol[2]) != len(items):
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Photoshop preview count does not match the requested layer count.",
+                exception_type="PreviewCountMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        previews = _parse_psd_preview_records(protocol[3])
+        expected_keys = {item["node_key"] for item in items}
+        if {item["node_key"] for item in previews} != expected_keys:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Photoshop preview response does not match the requested node keys.",
+                exception_type="PreviewIdentityMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        for preview in previews:
+            layer = layer_by_key[preview["node_key"]]
+            preview["name"] = layer["name"]
+            preview["kind"] = layer["kind"]
+            preview["path"] = layer["path"]
+            if preview["status"] == "OK":
+                preview_file = preview_folder / preview["file_name"]
+                if not preview_file.is_file() or preview_file.stat().st_size <= 0:
+                    preview["status"] = "ERROR"
+                    preview["error"] = "Photoshop reported success but the PNG is missing or empty."
+
+        contact_sheet = _build_layer_preview_contact_sheet(
+            previews,
+            preview_folder / "layer_contact_sheet.png",
+        )
+
+        source_hash_after = _sha256_file(source_file)
+        if source_hash_after != source_hash_before:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "The source PSD SHA-256 changed during layer preview generation.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        report = {
+            "schema_version": 1,
+            "passed": any(item["status"] == "OK" for item in previews),
+            "input_psd": str(source_file),
+            "source_sha256": source_hash_before,
+            "layer_tree_sha256": inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_folder),
+            "contact_sheet": contact_sheet,
+            "preview_count": len(previews),
+            "successful_count": sum(1 for item in previews if item["status"] == "OK"),
+            "failed_count": sum(1 for item in previews if item["status"] == "ERROR"),
+            "skipped_backgrounds": skipped_backgrounds,
+            "previews": previews,
+            "source_sha256_unchanged": True,
+        }
+        report_path = preview_folder / "preview_report.json"
+        report["report_path"] = str(report_path)
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return report
+    finally:
+        try:
+            if temp_input.exists():
+                temp_input.unlink()
+        except OSError:
+            pass
+
+
+
+
 # ---------------------------------------------------------------------------
 # Stage 8B: approved, non-destructive existing-PSD organization plans
 # ---------------------------------------------------------------------------
@@ -5061,7 +5590,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -5119,6 +5648,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Approved structure-only JSON plan for --action apply-organize-plan.",
     )
+    parser.add_argument(
+        "--preview-dir",
+        type=Path,
+        help="New output directory for --action preview-psd-layers.",
+    )
+    parser.add_argument(
+        "--preview-node-key",
+        action="append",
+        help="Specific PSD node key to preview; repeat to select multiple layers/groups.",
+    )
+    parser.add_argument("--preview-max-layers", type=int, default=80)
+    parser.add_argument("--preview-width-px", type=int, default=512)
     parser.add_argument(
         "--confirm-plan",
         action="store_true",
@@ -5256,6 +5797,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "preview-psd-layers":
+        if args.input_psd is None or args.preview_dir is None:
+            print(
+                "ERROR: --input-psd and --preview-dir are required "
+                "for --action preview-psd-layers.",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.action == "apply-organize-plan":
         if args.input_psd is None or args.organize_plan is None or args.output is None:
             print(
@@ -5355,6 +5905,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = inspect_psd(
                 args.input_psd,
                 report_path=args.inspection_report,
+                bridge=bridge,
+            )
+        elif args.action == "preview-psd-layers":
+            result = preview_psd_layers(
+                args.input_psd,
+                args.preview_dir,
+                node_keys=args.preview_node_key,
+                max_previews=args.preview_max_layers,
+                thumbnail_width_px=args.preview_width_px,
                 bridge=bridge,
             )
         elif args.action == "apply-organize-plan":
