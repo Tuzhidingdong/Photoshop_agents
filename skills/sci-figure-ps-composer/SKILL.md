@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization is now implemented and covered by unit tests; its nested-group Photoshop save/reopen flow is the current Stage 5 integration check. TIFF/PNG publication export and publication preflight remain on the roadmap.
+The implementation is staged. The Photoshop Bridge, `compose_grid`, editable panel labels, and calibrated scale bars have passed real-machine verification on the user's Photoshop 2026 environment. Recursive text-layer font normalization has passed the nested-group Photoshop save/reopen test. The Stage 6 PSD/TIFF/PNG publication export is implemented and covered by unit tests; its real Photoshop export and metadata verification is the current integration check. Publication preflight remains on the roadmap.
 
 ## Runtime requirements
 
@@ -71,6 +71,11 @@ python scripts/ps_sci_toolkit.py --action unify-fonts `
   --input-psd Figure_1_scalebar.psd --output Figure_1_fonts.psd `
   --unify-font-postscript ArialMT --unify-font-size-pt 7 `
   --unify-font-color "#000000"
+
+# Export an editable PSD copy, flattened RGB LZW TIFF, and RGB PNG.
+python scripts/ps_sci_toolkit.py --action export-figure `
+  --input-psd Figure_1_fonts.psd --export-dir Figure_1_exports `
+  --export-dpi 300
 ~~~
 
 The default action is diagnose.
@@ -103,9 +108,18 @@ After Stage 4 passes, run the Stage 5 recursive font-normalization integration t
 
 ~~~powershell
 python tests/test_unify_fonts_demo.py --input-psd path\\to\\Figure_Grid_Stage4_ScaleBar.psd
+python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 ~~~
 
 The Stage 5 demo creates a separate fixture PSD with an additional text layer nested two groups deep, then normalizes the font, point size, and color of every editable text layer into a new PSD. It reopens that output and verifies every text layer, including the nested test layer, as well as preservation of the four panel labels and scale-bar label. Both the supplied input PSD and the generated fixture PSD are checked for unchanged hashes.
+
+After Stage 5 passes, run the Stage 6 publication export integration test:
+
+~~~powershell
+python tests/test_export_figure_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
+~~~
+
+The Stage 6 test creates a new export folder containing a byte-identical editable PSD copy, a flattened RGB TIFF using LZW compression, and a flattened RGB PNG. Photoshop reopens the PSD/TIFF/PNG and verifies their dimensions, RGB mode, resolution, panel groups, Smart Objects, and text layers. Pillow reads—but does not rewrite—the raster exports to verify RGB mode, dimensions, DPI metadata, and TIFF compression tag 259 = 5 (LZW). The source PSD hash must remain unchanged.
 
 ### Bridge behavior
 
@@ -180,8 +194,8 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 
 1. `add_panel_labels`: implemented; CI and real Photoshop Stage 3 integration verified.
 2. `add_scale_bar`: implemented; CI and real Photoshop Stage 4 integration verified.
-3. `unify_fonts`: implemented with recursive nested-group traversal and selective font/size/color normalization; unit tests pass, real Photoshop Stage 5 verification pending.
-4. `export_figure`: editable PSD plus RGB LZW TIFF and high-resolution PNG.
+3. `unify_fonts`: implemented; unit tests and real Photoshop Stage 5 recursive integration verified.
+4. `export_figure`: implemented; unit tests cover editable PSD copy, RGB LZW TIFF, RGB PNG, DPI, dimensions, and output protection; real Photoshop Stage 6 verification pending.
 5. `preflight_figure`: canvas dimensions, effective panel PPI, layer structure, label/font checks, calibration checks, and export metadata checks.
 
 ## add_scale_bar: current implementation
@@ -244,6 +258,31 @@ result = unify_fonts(
 ~~~
 
 At least one normalization attribute is required. Any attribute passed as `None` is left unchanged. The operation traverses every document-level and nested `LayerSet`, finds only native Photoshop `LayerKind.TEXT` layers, and applies the requested font PostScript name, point size, and/or RGB color in one JSX execution. It then reads each changed value back for verification and saves a separate editable PSD. Raster layers and embedded Smart Objects are not modified. The source PSD is never saved in place.
+
+## export_figure: current implementation
+
+The Python API is:
+
+~~~python
+from ps_sci_toolkit import export_figure
+
+result = export_figure(
+    "Figure_1_fonts.psd",
+    "Figure_1_exports",
+    basename="Figure_1",
+    expected_dpi=300,
+)
+~~~
+
+The bundle contains:
+
+- `Figure_1.psd`: byte-identical copy of the editable source PSD, retaining its native groups, Smart Objects, and text layers.
+- `Figure_1.tif`: flattened RGB TIFF saved by Photoshop with LZW compression, embedded color profile, and IBM byte order for Windows.
+- `Figure_1.png`: flattened RGB PNG saved by Photoshop.
+
+The TIFF and PNG are created from two independent duplicates of the source document. Only those duplicates are flattened; the input PSD is never flattened or saved. Canvas dimensions are not resampled and source resolution must be 300 or 600 DPI. An optional `expected_dpi` checks the requested value without changing resolution.
+
+Before publishing the output bundle, Photoshop reopens all three staged files and checks their dimensions, RGB mode, and resolution. Python then reads TIFF/PNG metadata only: RGB mode, pixel dimensions, DPI, and TIFF compression tag 259 (value 5 = LZW). It does not re-encode the images. Output files are staged under temporary names and moved into their final paths only after export and metadata checks succeed; the source PSD's SHA-256 must remain unchanged.
 
 The CLI options are `--unify-font-postscript`, `--unify-font-size-pt`, and `--unify-font-color`; specify at least one. The real Photoshop demo deliberately inserts a text layer two groups deep before normalization to prove the recursive traversal, then reopens the result to check every text layer.
 Implement and test each feature separately. Keep the Python public API stable where practical and put native Photoshop operations in JSX helpers.
