@@ -1225,6 +1225,10 @@ class FakePreviewBridge:
         config = json.loads(match.group(1))
         from PIL import Image
 
+        Image.new("RGBA", (128, 96), (245, 245, 245, 255)).save(
+            Path(config["output_dir"]) / "composite.png",
+            format="PNG",
+        )
         records = []
         for item in config["items"]:
             preview_path = Path(config["output_dir"]) / item["file_name"]
@@ -1267,6 +1271,7 @@ class PreviewPsdLayersTests(unittest.TestCase):
         self.assertEqual(result["failed_count"], 0)
         self.assertEqual(result["skipped_backgrounds"], ["root/L3"])
         self.assertTrue(Path(result["contact_sheet"]["path"]).is_file())
+        self.assertTrue(Path(result["composite_preview"]).is_file())
         self.assertTrue(Path(result["report_path"]).is_file())
         self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
         self.assertTrue(result["source_sha256_unchanged"])
