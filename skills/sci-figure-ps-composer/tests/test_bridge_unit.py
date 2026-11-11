@@ -34,6 +34,7 @@ from ps_sci_toolkit import (
     _build_preview_psd_layers_jsx,
     validate_psd_classification,
     create_psd_classification_template,
+    finalize_psd_classification_template,
     _suggest_psd_semantic_role,
     create_organize_plan_draft,
     _parse_psd_preview_records,
@@ -1677,6 +1678,128 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         self.assertFalse(partial["full_visual_coverage"])
         self.assertEqual(partial["preview_success_count"], 3)
         self.assertEqual(partial["preview_failure_count"], 0)
+
+    def _make_reviewed_template_with_full_previews(self):
+        preview_dir = self.root / "finalize_previews"
+        preview_dir.mkdir()
+        composite = preview_dir / "composite.png"
+        contact = preview_dir / "layer_contact_sheet.png"
+        composite.write_bytes(b"composite")
+        contact.write_bytes(b"contact")
+        previews = []
+        for index, layer in enumerate(self.inspection["layers"], start=1):
+            if layer["is_background"]:
+                continue
+            filename = "layer_" + str(index).zfill(3) + ".png"
+            (preview_dir / filename).write_bytes(b"isolated-preview")
+            previews.append({
+                "node_key": layer["node_key"],
+                "file_name": filename,
+                "status": "OK",
+            })
+        preview_manifest = {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_dir),
+            "composite_preview": str(composite),
+            "contact_sheet": {"path": str(contact)},
+            "previews": previews,
+        }
+        preview_report_path = self.root / "finalize_preview_report.json"
+        preview_report_path.write_text(
+            json.dumps(preview_manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        template_path = self.root / "finalize_work_template.json"
+        create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            template_path,
+            preview_report=preview_report_path,
+        )
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+        for node in template["nodes"]:
+            if node["is_background"]:
+                continue
+            preview_item = next(
+                item for item in previews if item["node_key"] == node["node_key"]
+            )
+            node["classification_seed"] = {
+                "role": "unknown",
+                "confidence": 0.2,
+                "rationale": "The isolated preview was reviewed; the scientific role remains uncertain.",
+                "evidence": [{
+                    "type": "visual_preview",
+                    "preview_node_key": node["node_key"],
+                    "observation": "The isolated preview was opened and reviewed; no reliable semantic role can be assigned.",
+                }],
+                "status": "agent_reviewed",
+            }
+        template_path.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return template_path, template
+
+    def test_finalize_reviewed_classification_template_writes_valid_report(self):
+        template_path, template = self._make_reviewed_template_with_full_previews()
+        output = self.root / "final_classification.json"
+
+        result = finalize_psd_classification_template(template_path, output)
+        report = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["classification_count"], 5)
+        self.assertEqual(result["role_counts"]["background"], 1)
+        self.assertEqual(result["role_counts"]["unknown"], 4)
+        self.assertTrue(result["template_preserved"])
+        self.assertTrue(result["requires_user_approval_for_organization"])
+        self.assertFalse(result["organizer_operations_created"])
+        self.assertEqual(len(report["classifications"]), 5)
+        self.assertEqual(
+            report["source_sha256"],
+            template["source_sha256"],
+        )
+        self.assertEqual(
+            template_path.read_text(encoding="utf-8"),
+            template_path.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+
+    def test_finalize_rejects_unreviewed_nodes_and_missing_visual_evidence(self):
+        template_path, template = self._make_reviewed_template_with_full_previews()
+        output = self.root / "must_not_exist.json"
+
+        pending = next(
+            node for node in template["nodes"] if not node["is_background"]
+        )
+        pending["classification_seed"]["status"] = "pending_agent_review"
+        template_path.write_text(json.dumps(template), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "has not completed the required review state"):
+            finalize_psd_classification_template(template_path, output)
+        self.assertFalse(output.exists())
+
+        pending["classification_seed"]["status"] = "agent_reviewed"
+        pending["classification_seed"]["evidence"] = [{
+            "type": "layer_name",
+            "observation": pending["name"],
+        }]
+        template_path.write_text(json.dumps(template), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "requires reviewed visual_preview evidence"):
+            finalize_psd_classification_template(template_path, output)
+        self.assertFalse(output.exists())
+
+    def test_finalize_requires_complete_preview_coverage_and_preserves_template(self):
+        template_path, template = self._make_reviewed_template_with_full_previews()
+        template["summary"]["full_visual_coverage"] = False
+        template_path.write_text(json.dumps(template), encoding="utf-8")
+        output = self.root / "incomplete_classification.json"
+
+        with self.assertRaisesRegex(ValueError, "complete isolated-preview coverage"):
+            finalize_psd_classification_template(template_path, output)
+        self.assertFalse(output.exists())
+        self.assertTrue(template_path.is_file())
 
     def test_classification_template_rejects_stale_inspection_hash(self):
         stale = json.loads(json.dumps(self.inspection))
