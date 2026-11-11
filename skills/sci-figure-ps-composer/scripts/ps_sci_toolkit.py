@@ -342,6 +342,546 @@ class PhotoshopBridge:
         return report
 
 
+
+# ---------------------------------------------------------------------------
+# Stage 2: scientific grid composition
+# ---------------------------------------------------------------------------
+
+JOURNAL_WIDTH_PRESETS = {
+    "single": 8.5,
+    "half_double": 12.0,
+    "double": 17.6,
+}
+
+
+def cm_to_pixels(value_cm: float, dpi: int) -> int:
+    """Convert centimetres to integer pixels using the requested document DPI."""
+    return int(round(float(value_cm) * int(dpi) / 2.54))
+
+
+def _image_dimensions(image_path: Path) -> tuple[int, int]:
+    """Read raster dimensions without modifying or re-encoding the source file."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise PhotoshopBridgeError(
+            "compose_grid",
+            "Pillow is required to inspect image dimensions. Install the Skill requirements.",
+            exception_type="MissingDependency",
+        ) from exc
+
+    try:
+        with Image.open(str(image_path)) as image:
+            width, height = image.size
+    except Exception as exc:
+        raise PhotoshopBridgeError(
+            "compose_grid",
+            "Could not read raster dimensions for " + str(image_path) + ": " + str(exc),
+            exception_type=type(exc).__name__,
+        ) from exc
+
+    if width <= 0 or height <= 0:
+        raise PhotoshopBridgeError(
+            "compose_grid",
+            "Image has invalid dimensions: " + str(image_path),
+            exception_type="InvalidImageDimensions",
+        )
+    return int(width), int(height)
+
+
+def _panel_name(index: int) -> str:
+    """Return spreadsheet-style lowercase panel names: a..z, aa, ab, ..."""
+    if index < 0:
+        raise ValueError("Panel index must be non-negative.")
+    value = index + 1
+    result = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        result = chr(ord("a") + remainder) + result
+    return result
+
+
+def calculate_grid_layout(
+    image_sizes: list[tuple[int, int]],
+    *,
+    width_cm: float,
+    height_cm: Optional[float] = None,
+    rows: int,
+    cols: int,
+    dpi: int = 300,
+    margin_cm: float = 0.3,
+    gap_cm: float = 0.2,
+) -> Dict[str, Any]:
+    """Calculate a row-major grid in pixels; no Photoshop connection is needed."""
+    if not image_sizes:
+        raise ValueError("At least one image is required.")
+    if rows < 1 or cols < 1:
+        raise ValueError("rows and cols must both be positive integers.")
+    if len(image_sizes) != rows * cols:
+        raise ValueError(
+            "The number of images must equal rows × cols "
+            f"({len(image_sizes)} supplied, {rows * cols} required)."
+        )
+    if dpi not in (300, 600):
+        raise ValueError("dpi must be 300 or 600.")
+    if width_cm <= 0:
+        raise ValueError("width_cm must be greater than zero.")
+    if height_cm is not None and height_cm <= 0:
+        raise ValueError("height_cm must be greater than zero.")
+    if margin_cm < 0 or gap_cm < 0:
+        raise ValueError("margin_cm and gap_cm cannot be negative.")
+    if any(w <= 0 or h <= 0 for w, h in image_sizes):
+        raise ValueError("All source images must have positive dimensions.")
+
+    width_px = cm_to_pixels(width_cm, dpi)
+    margin_px = cm_to_pixels(margin_cm, dpi)
+    gap_px = cm_to_pixels(gap_cm, dpi)
+
+    usable_width = width_px - 2 * margin_px - gap_px * (cols - 1)
+    if usable_width <= 0:
+        raise ValueError("Margins and gaps leave no usable canvas width.")
+
+    cell_width = float(usable_width) / cols
+
+    if height_cm is None:
+        # Derive cell height from the median source aspect ratio. This gives
+        # the grid a sensible initial print aspect ratio without cropping data.
+        aspect_ratios = sorted(float(w) / float(h) for w, h in image_sizes)
+        middle = len(aspect_ratios) // 2
+        if len(aspect_ratios) % 2:
+            median_aspect = aspect_ratios[middle]
+        else:
+            median_aspect = (aspect_ratios[middle - 1] + aspect_ratios[middle]) / 2.0
+        estimated_cell_height = cell_width / median_aspect
+        height_px = int(round(
+            estimated_cell_height * rows
+            + 2 * margin_px
+            + gap_px * (rows - 1)
+        ))
+    else:
+        height_px = cm_to_pixels(height_cm, dpi)
+
+    usable_height = height_px - 2 * margin_px - gap_px * (rows - 1)
+    if usable_height <= 0:
+        raise ValueError("Margins and gaps leave no usable canvas height.")
+
+    cell_height = float(usable_height) / rows
+    panels = []
+
+    for index, (source_width, source_height) in enumerate(image_sizes):
+        row = index // cols
+        col = index % cols
+        x = margin_px + col * (cell_width + gap_px)
+        y = margin_px + row * (cell_height + gap_px)
+        panels.append({
+            "index": index,
+            "panel": _panel_name(index),
+            "group_name": "Group_Panel_" + _panel_name(index),
+            "layer_name": "Image_Panel_" + _panel_name(index),
+            "source_width_px": source_width,
+            "source_height_px": source_height,
+            "x": int(round(x)),
+            "y": int(round(y)),
+            "width": int(round(cell_width)),
+            "height": int(round(cell_height)),
+        })
+
+    return {
+        "width_px": width_px,
+        "height_px": height_px,
+        "actual_width_cm": width_px * 2.54 / dpi,
+        "actual_height_cm": height_px * 2.54 / dpi,
+        "dpi": dpi,
+        "rows": rows,
+        "cols": cols,
+        "margin_px": margin_px,
+        "gap_px": gap_px,
+        "cell_width_px": cell_width,
+        "cell_height_px": cell_height,
+        "panels": panels,
+    }
+
+
+def _build_compose_grid_jsx(config: Dict[str, Any]) -> str:
+    """Build a self-contained ExtendScript payload from validated JSON data."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function px(value) {
+        return value.as("px");
+    }
+    function boundsOf(layer) {
+        var b = layer.bounds;
+        return {
+            left: px(b[0]),
+            top: px(b[1]),
+            right: px(b[2]),
+            bottom: px(b[3])
+        };
+    }
+    function placeEmbeddedSmartObject(filePath) {
+        var fileRef = new File(filePath);
+        if (!fileRef.exists) {
+            throw new Error("Source image does not exist: " + filePath);
+        }
+        var descriptor = new ActionDescriptor();
+        descriptor.putPath(charIDToTypeID("null"), fileRef);
+        descriptor.putEnumerated(
+            charIDToTypeID("FTcs"),
+            charIDToTypeID("QCSt"),
+            charIDToTypeID("Qcsa")
+        );
+        var offset = new ActionDescriptor();
+        offset.putUnitDouble(charIDToTypeID("Hrzn"), charIDToTypeID("#Pxl"), 0);
+        offset.putUnitDouble(charIDToTypeID("Vrtc"), charIDToTypeID("#Pxl"), 0);
+        descriptor.putObject(charIDToTypeID("Ofst"), charIDToTypeID("Ofst"), offset);
+        executeAction(charIDToTypeID("Plc "), descriptor, DialogModes.NO);
+        return app.activeDocument.activeLayer;
+    }
+    function trimEmbeddedObject(parentDoc, smartLayer) {
+        var smartDoc = null;
+        var changed = false;
+        try {
+            parentDoc.activeLayer = smartLayer;
+            executeAction(
+                stringIDToTypeID("placedLayerEditContents"),
+                new ActionDescriptor(),
+                DialogModes.NO
+            );
+            smartDoc = app.activeDocument;
+
+            var oldWidth = px(smartDoc.width);
+            var oldHeight = px(smartDoc.height);
+            var whiteTopLeft = false;
+
+            // Only invoke color-based trim when the top-left pixel is near-white.
+            // This avoids trimming a dark feature when the source has no white
+            // corner. TOPLEFT uses the exact corner pixel as its trim color.
+            try {
+                var sampler = smartDoc.colorSamplers.add([
+                    new UnitValue(0, "px"),
+                    new UnitValue(0, "px")
+                ]);
+                var rgb = sampler.color.rgb;
+                whiteTopLeft = (
+                    rgb.red >= 245 &&
+                    rgb.green >= 245 &&
+                    rgb.blue >= 245
+                );
+                sampler.remove();
+            } catch (sampleError) {
+                whiteTopLeft = false;
+            }
+
+            if (whiteTopLeft) {
+                smartDoc.trim(TrimType.TOPLEFT, true, true, true, true);
+            }
+            smartDoc.trim(TrimType.TRANSPARENT, true, true, true, true);
+
+            var newWidth = px(smartDoc.width);
+            var newHeight = px(smartDoc.height);
+            changed = (newWidth < oldWidth || newHeight < oldHeight);
+
+            smartDoc.close(SaveOptions.SAVECHANGES);
+            smartDoc = null;
+            app.activeDocument = parentDoc;
+
+            return {
+                changed: changed,
+                original_width: oldWidth,
+                original_height: oldHeight,
+                trimmed_width: newWidth,
+                trimmed_height: newHeight
+            };
+        } catch (trimError) {
+            if (smartDoc !== null) {
+                try {
+                    smartDoc.close(SaveOptions.DONOTSAVECHANGES);
+                } catch (closeError) {}
+            }
+            app.activeDocument = parentDoc;
+            throw trimError;
+        }
+    }
+
+    var cfg = __SCI_FIGURE_CONFIG__;
+    var doc = null;
+    var previousDialogs = app.displayDialogs;
+    var trimmedCount = 0;
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        if (cfg.output_path) {
+            var existingOutput = new File(cfg.output_path);
+            if (existingOutput.exists && !cfg.overwrite) {
+                throw new Error("Output already exists; set overwrite=true to replace it: " + cfg.output_path);
+            }
+            if (existingOutput.exists && cfg.overwrite) {
+                if (!existingOutput.remove()) {
+                    throw new Error("Could not remove existing output file: " + cfg.output_path);
+                }
+            }
+        }
+
+        doc = app.documents.add(
+            cfg.width_px,
+            cfg.height_px,
+            cfg.dpi,
+            cfg.document_name,
+            NewDocumentMode.RGB,
+            DocumentFill.WHITE
+        );
+
+        for (var i = 0; i < cfg.panels.length; i++) {
+            var panel = cfg.panels[i];
+            app.activeDocument = doc;
+
+            var panelGroup = doc.layerSets.add();
+            panelGroup.name = panel.group_name;
+
+            var imageLayer = placeEmbeddedSmartObject(panel.path);
+            imageLayer.name = panel.layer_name;
+            imageLayer.move(panelGroup, ElementPlacement.INSIDE);
+
+            if (cfg.auto_trim) {
+                var trimResult = trimEmbeddedObject(doc, imageLayer);
+                if (trimResult.changed) {
+                    trimmedCount++;
+                }
+            }
+
+            app.activeDocument = doc;
+            doc.activeLayer = imageLayer;
+
+            var imageBounds = boundsOf(imageLayer);
+            var imageWidth = imageBounds.right - imageBounds.left;
+            var imageHeight = imageBounds.bottom - imageBounds.top;
+
+            if (imageWidth <= 0 || imageHeight <= 0) {
+                throw new Error("Placed image has empty bounds: " + panel.path);
+            }
+
+            var scale = Math.min(
+                panel.width / imageWidth,
+                panel.height / imageHeight
+            );
+            if (!(scale > 0)) {
+                throw new Error("Invalid panel scale for: " + panel.path);
+            }
+
+            imageLayer.resize(
+                scale * 100,
+                scale * 100,
+                AnchorPosition.MIDDLECENTER
+            );
+
+            imageBounds = boundsOf(imageLayer);
+            imageWidth = imageBounds.right - imageBounds.left;
+            imageHeight = imageBounds.bottom - imageBounds.top;
+
+            var targetLeft;
+            var targetTop;
+            if (cfg.align === "top-left") {
+                targetLeft = panel.x;
+                targetTop = panel.y;
+            } else {
+                targetLeft = panel.x + (panel.width - imageWidth) / 2;
+                targetTop = panel.y + (panel.height - imageHeight) / 2;
+            }
+
+            imageLayer.translate(
+                targetLeft - imageBounds.left,
+                targetTop - imageBounds.top
+            );
+        }
+
+        app.activeDocument = doc;
+
+        var savedPath = "";
+        if (cfg.output_path) {
+            var saveFile = new File(cfg.output_path);
+            var psdOptions = new PhotoshopSaveOptions();
+            psdOptions.embedColorProfile = true;
+            psdOptions.maximizeCompatibility = true;
+            doc.saveAs(saveFile, psdOptions, true, Extension.LOWERCASE);
+            savedPath = saveFile.fsName;
+        }
+
+        return [
+            "SCI_PS_COMPOSE",
+            "OK",
+            clean(doc.name),
+            String(px(doc.width)),
+            String(px(doc.height)),
+            String(doc.resolution),
+            String(cfg.panels.length),
+            String(trimmedCount),
+            clean(savedPath)
+        ].join("\t");
+
+    } catch (e) {
+        var errorLine = (e.line === undefined) ? "" : e.line;
+        return [
+            "SCI_PS_COMPOSE",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean(errorLine),
+            doc === null ? "NO_DOCUMENT" : "PARTIAL_DOCUMENT:" + clean(doc.name)
+        ].join("\t");
+    } finally {
+        app.displayDialogs = previousDialogs;
+    }
+})();
+"""
+    return template.replace("__SCI_FIGURE_CONFIG__", payload)
+
+
+def compose_grid(
+    image_paths: list[str | Path],
+    output_path: Optional[str | Path] = None,
+    *,
+    preset: str = "double",
+    width_cm: Optional[float] = None,
+    height_cm: Optional[float] = None,
+    rows: int = 2,
+    cols: int = 2,
+    dpi: int = 300,
+    margin_cm: float = 0.3,
+    gap_cm: float = 0.2,
+    align: str = "center",
+    auto_trim: bool = False,
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Compose raster panels as embedded Smart Objects in a native Photoshop PSD."""
+    if align not in ("center", "top-left"):
+        raise ValueError("align must be 'center' or 'top-left'.")
+    if preset not in ("single", "half_double", "double", "custom"):
+        raise ValueError("preset must be single, half_double, double, or custom.")
+
+    if preset == "custom":
+        if width_cm is None:
+            raise ValueError("width_cm is required when preset='custom'.")
+        selected_width = float(width_cm)
+    else:
+        selected_width = JOURNAL_WIDTH_PRESETS[preset]
+        if width_cm is not None and abs(float(width_cm) - selected_width) > 1e-9:
+            raise ValueError(
+                "width_cm conflicts with preset '" + preset +
+                "'. Use preset='custom' to specify a different width."
+            )
+
+    paths = [Path(p).expanduser().resolve(strict=True) for p in image_paths]
+    if len(paths) != rows * cols:
+        raise ValueError(
+            "The number of images must equal rows × cols "
+            f"({len(paths)} supplied, {rows * cols} required)."
+        )
+    if any(not path.is_file() for path in paths):
+        raise ValueError("Every input path must be a file.")
+    image_sizes = [_image_dimensions(path) for path in paths]
+
+    layout = calculate_grid_layout(
+        image_sizes,
+        width_cm=selected_width,
+        height_cm=height_cm,
+        rows=rows,
+        cols=cols,
+        dpi=dpi,
+        margin_cm=margin_cm,
+        gap_cm=gap_cm,
+    )
+
+    output_file: Optional[Path] = None
+    if output_path is not None:
+        output_file = Path(output_path).expanduser().resolve()
+        if output_file.suffix.lower() != ".psd":
+            raise ValueError("compose_grid output_path must end in .psd.")
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        if output_file.exists() and not overwrite:
+            raise FileExistsError(
+                "Output already exists; pass overwrite=True to replace it: "
+                + str(output_file)
+            )
+
+    document_name = (
+        output_file.stem if output_file is not None else "Scientific_Figure"
+    )
+    panels = []
+    for path, panel_geometry in zip(paths, layout["panels"]):
+        panel = dict(panel_geometry)
+        panel["path"] = str(path)
+        panels.append(panel)
+
+    config = {
+        "document_name": document_name,
+        "width_px": layout["width_px"],
+        "height_px": layout["height_px"],
+        "dpi": dpi,
+        "align": align,
+        "auto_trim": bool(auto_trim),
+        "output_path": str(output_file) if output_file is not None else "",
+        "overwrite": bool(overwrite),
+        "panels": panels,
+    }
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    jsx = _build_compose_grid_jsx(config)
+    raw = active_bridge.execute_jsx(jsx)
+    fields = _parse_protocol(
+        raw,
+        "SCI_PS_COMPOSE",
+        9,
+        "compose_grid",
+        jsx,
+    )
+
+    result = {
+        "document_name": fields[2],
+        "width_px": int(fields[3]),
+        "height_px": int(fields[4]),
+        "dpi": float(fields[5]),
+        "panel_count": int(fields[6]),
+        "trimmed_panel_count": int(fields[7]),
+        "saved_psd": fields[8] or None,
+        "requested_width_cm": selected_width,
+        "actual_width_cm": layout["actual_width_cm"],
+        "actual_height_cm": layout["actual_height_cm"],
+        "rows": rows,
+        "cols": cols,
+        "align": align,
+        "auto_trim": bool(auto_trim),
+        "panels": panels,
+        "passed": True,
+    }
+
+    if result["width_px"] != layout["width_px"] or result["height_px"] != layout["height_px"]:
+        raise PhotoshopBridgeError(
+            "compose_grid",
+            "Photoshop document dimensions do not match the calculated layout.",
+            exception_type="CanvasDimensionMismatch",
+            jsx_preview=_clean_jsx_preview(jsx),
+        )
+
+    if output_file is not None:
+        if not output_file.is_file() or output_file.stat().st_size <= 0:
+            raise PhotoshopBridgeError(
+                "compose_grid",
+                "Photoshop reported a save but the PSD file is missing or empty: "
+                + str(output_file),
+                exception_type="PsdSaveVerificationError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+    return result
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
