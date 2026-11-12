@@ -1298,6 +1298,28 @@ class PreviewPsdLayersTests(unittest.TestCase):
         self.assertIn("ResampleMethod.BICUBICSHARPER", bridge.jsx_calls[-1])
         self.assertIn("SaveOptions.DONOTSAVECHANGES", bridge.jsx_calls[-1])
 
+    def test_preview_psd_layers_reuses_supplied_inspection_without_second_inspection(self):
+        inspection = inspect_psd(
+            self.input_psd,
+            bridge=FakeInspectBridge(_make_inspection_response()),
+        )
+        bridge = FakePreviewBridge()
+        output_dir = self.root / "reused_inspection_previews"
+
+        result = preview_psd_layers(
+            self.input_psd,
+            output_dir,
+            inspection_report=inspection,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["full_visual_coverage"])
+        self.assertEqual(result["layer_tree_sha256"], inspection["layer_tree_sha256"])
+        self.assertEqual(len(bridge.jsx_calls), 1)
+        self.assertNotIn("SCI_PS_INSPECT_PSD", bridge.jsx_calls[0])
+        self.assertIn("SCI_PSD_PREVIEW", bridge.jsx_calls[0])
+
     def test_preview_psd_layers_can_select_specific_node_keys(self):
         bridge = FakePreviewBridge()
         output_dir = self.root / "selected_previews"
