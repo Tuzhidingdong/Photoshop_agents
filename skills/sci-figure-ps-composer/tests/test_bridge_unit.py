@@ -2032,6 +2032,67 @@ class PsdSemanticClassificationTests(unittest.TestCase):
         self.assertEqual(saved["operations"][0]["action"], "create_group")
         self.assertEqual(saved["source_sha256"], self.inspection["source_sha256"])
 
+    def test_plan_draft_reports_risk_levels_and_explicit_visibility_acknowledgement(self):
+        output = self.root / "risk_assessed_plan.json"
+        operations = [
+            {"action": "create_group", "key": "review_group", "name": "Review_Group", "parent": "root"},
+            {
+                "action": "rename_layer",
+                "target": "root/G1",
+                "expected_name": "Old Group",
+                "new_name": "Legacy_Source_Group",
+            },
+            {
+                "action": "move_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "destination": "review_group",
+                "position": "end",
+            },
+            {
+                "action": "reorder_layer",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "relative_to": "root/L0",
+                "relative_expected_name": "Title",
+                "position": "before",
+            },
+            {
+                "action": "set_visibility",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "visible": False,
+            },
+        ]
+        result = create_organize_plan_draft(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+            operations,
+            output,
+        )
+
+        risk = result["risk_assessment"]
+        saved = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(risk["overall_level"], "critical")
+        self.assertEqual(risk["counts"], {"low": 2, "high": 2, "critical": 1})
+        self.assertTrue(risk["requires_user_approval"])
+        self.assertIn("explicitly acknowledge", risk["approval_guidance"])
+        self.assertEqual(saved["risk_assessment"], risk)
+
+        reviews = risk["operation_reviews"]
+        self.assertEqual([item["risk_level"] for item in reviews],
+                         ["low", "low", "high", "high", "critical"])
+        visibility = reviews[-1]
+        self.assertEqual(visibility["visual_impact"], "direct")
+        self.assertEqual(visibility["before"], "visible")
+        self.assertEqual(visibility["after"], "hidden")
+        self.assertEqual(
+            visibility["approval_requirement"],
+            "must_be_explicitly_acknowledged",
+        )
+        self.assertIn("delete_layer", risk["prohibited_automatic_actions"])
+
     def test_plan_draft_rejects_unsafe_operations_and_existing_output(self):
         output = self.root / "unsafe_plan.json"
         unsafe = [{
