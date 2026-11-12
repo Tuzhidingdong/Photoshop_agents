@@ -300,6 +300,19 @@ A full-plan approval is always required. Low- and high-risk operations may be ap
 
 The organizer v1 allowlist is deliberately narrow. Delete, merge, flatten, rasterize, crop, resize, transform, and pixel-content edits are prohibited; do not translate a user request for those changes into an organizer operation. They require a separate workflow and explicit handling, not an automatic fallback.
 
+### User-facing approval presentation
+
+Before execution, use the generated `risk_assessment.operation_reviews` to present one concise approval summary. Do not expose raw node keys as the only identifiers; pair them with exact layer paths and names.
+
+1. Identify the source PSD and state that the original will remain untouched.
+2. Summarize the total operation count and low/high/critical counts.
+3. Group low-risk group creation and renames together, showing exact names and destination parents.
+4. List every high-risk move/reorder with its exact old path, new parent or relative stacking position, and a concise note that visual blending/occlusion may change.
+5. Put every critical visibility transition in a visually separate section, with the layer path/name and exact `visible → hidden` or `hidden → visible` change. State explicitly that this changes the rendered figure.
+6. State that unsupported destructive/pixel-changing operations are not included and that the output will be a new PSD path.
+
+Ask for one approval of the complete listed plan. When critical visibility operations exist, the approval question must explicitly name that visibility changes are included; do not infer their approval from a generic request to “organize the layers”. If the user approves only part of the plan, remove the declined operations and regenerate the risk-assessed draft before execution. If a layer's scientific purpose is uncertain, keep it `unknown` and do not invent a consequential operation for it.
+
 
 
 ~~~json
