@@ -9,7 +9,7 @@ description: Automate publication-ready scientific multi-panel figure compositio
 
 Create and maintain publication-ready scientific multi-panel figures in the Windows desktop edition of Adobe Photoshop. Python is the orchestration and geometry layer; Photoshop remains the native document, typography, layer, smart-object, and export engine.
 
-The implementation is staged. Stages 1–8 and the Stage 9A partial-preview workflow have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs. Both Stage 8A inspection and Stage 8B Smart Object reparenting passed real Photoshop 2026 (27.9.1) integration tests; the source PSD hash remained unchanged. Stage 9A adds isolated layer/group PNG previews, a full-composite preview, and a labeled contact sheet for visual review. It passed real Photoshop 2026 (27.9.1) verification on the 19-layer test PSD: 12 selected layer/group previews succeeded, the composite/contact sheet/report were created, and the original PSD SHA-256 remained unchanged. The initial real-machine run intentionally capped previews at 12 of 19 nodes. The Stage 9A integration demo now requires complete coverage of every non-background node by default and fails if the selected limit truncates the layer tree or any isolated preview fails; `--allow-partial` is reserved for explicitly partial diagnostic runs.
+The implementation is staged. Stages 1–8 and the Stage 9A full-coverage visual-preview workflow have passed real-machine verification on the user's Windows installation running Photoshop 2026 (27.9.1). The Photoshop Bridge, `compose_grid`, editable panel labels, calibrated scale bars, recursive text-layer font normalization, and Stage 6 PSD/TIFF/PNG publication export were verified individually. Stage 7 read-only publication preflight has also passed against the Stage 5 PSD and Stage 6 export bundle, including Smart Object inspection, effective PPI, scale calibration, export metadata, source-hash preservation, and restoration of Photoshop's prior document and preferences. Stage 8 adds a quiet/interactive execution policy and read-only inspection plus approved, structure-only organization plans for existing PSDs. Both Stage 8A inspection and Stage 8B Smart Object reparenting passed real Photoshop 2026 (27.9.1) integration tests; the source PSD hash remained unchanged. Stage 9A adds isolated layer/group PNG previews, a full-composite preview, and a labeled contact sheet for visual review. It passed real Photoshop 2026 (27.9.1) verification on the 19-layer test PSD: 12 selected layer/group previews succeeded, the composite/contact sheet/report were created, and the original PSD SHA-256 remained unchanged. The initial real-machine run intentionally capped previews at 12 of 19 nodes. The Stage 9A integration demo now requires complete coverage of every non-background node by default and fails if the selected limit truncates the layer tree or any isolated preview fails; `--allow-partial` is reserved for explicitly partial diagnostic runs.
 
 ## Runtime requirements
 
@@ -233,14 +233,43 @@ The output path must end in `.psd`. Existing files are protected unless `overwri
 2. Stage 8 execution modes: `quiet` and `interactive` are implemented; unit coverage is included. `quiet` is not true headless execution.
 3. Stage 8A `inspect_psd`: implemented; returns a read-only, mixed-order layer tree and source integrity hashes. Real Photoshop 2026 integration passed against a 19-layer research figure (6 groups, 6 text layers, 4 Smart Objects).
 4. Stage 8B `apply_organize_plan`: implemented as an explicitly approved, structure-only plan executor operating on a temporary byte-identical PSD copy and saving to a new PSD. Real Photoshop 2026 integration passed by moving an embedded Smart Object into a new group, reopening the output, and verifying 20 layers, unchanged text/Smart Object counts, and unchanged source SHA-256.
-5. Stage 9A `preview_psd_layers`: implemented; exports a composite preview and isolated previews of selected layers/groups from disposable copies, then builds a labeled contact sheet and JSON manifest. Real Photoshop 2026 integration passed: 12/12 selected previews succeeded, 0 failed, and source SHA-256 was unchanged. The tested run selected only the first 12 nodes; full-tree visual coverage still requires a run with a larger `--preview-max-layers` CLI value.
+5. Stage 9A `preview_psd_layers`: implemented; exports a composite preview and isolated previews of selected layers/groups from disposable copies, then builds a labeled contact sheet and JSON manifest. Real Photoshop 2026 integration passed on the user's 19-node PSD: all 18 non-background nodes were previewed successfully, 0 failed, full visual coverage was true, and source SHA-256 was unchanged.
 6. Stage 9B evidence-grounded classification and plan drafting: implemented with a model-independent JSON contract and Python validation. It checks full node coverage, unique node keys, source/tree fingerprints, confidence, role compatibility, and evidence against actual inspection/preview artifacts. It can produce an unapproved structure-only organizer plan draft; the user must inspect it and separately approve execution. Real Photoshop is not required for this metadata/JSON validation stage.
+7. Existing-PSD intake orchestration: `prepare_existing_psd` performs one read-only inspection, reuses that inventory for full isolated previews, and creates a reviewable classification work template plus a workflow manifest. The individual inspect/preview actions remain available for targeted diagnostics.
 
 ## Existing PSD inspection and organization
 
 This workflow is for PSDs created outside this Skill or PSDs whose layer structure has become difficult to maintain. It is separate from `compose_grid`, which creates a new figure from raster inputs.
 
-### Inspect before proposing changes
+### One-command intake (recommended)
+
+For normal existing-PSD work, use one command to prepare the complete evidence package. Do not separately run `inspect-psd` and then `preview-psd-layers` for the same source; the preview API accepts and reuses the inspection result.
+
+~~~powershell
+python scripts/ps_sci_toolkit.py --action prepare-existing-psd `
+  --input-psd Figure_legacy.psd `
+  --workflow-dir Figure_legacy_audit `
+  --workflow-max-previews 200 `
+  --preview-width-px 512 `
+  --execution-mode quiet --json
+~~~
+
+The workflow directory must be new. The command uses one shared Photoshop bridge and creates:
+
+- `inspection_report.json`: the ordered PSD layer tree, source hash, and tree fingerprint.
+- `visual_previews/composite.png`: the full-figure visual reference.
+- `visual_previews/layer_*.png`: isolated previews for every non-background node.
+- `visual_previews/layer_contact_sheet.png` and `preview_report.json`: indexed preview evidence and coverage.
+- `classification_work_template.json`: a node-by-node work template linked to the inspection and preview evidence.
+- `workflow_manifest.json`: the artifact index and the next review step.
+
+The inspection result is passed directly into preview generation, so the same PSD layer inventory is not queried a second time. Full visual coverage is required by this workflow; the maximum is 200 non-background nodes. If coverage cannot be achieved, the command stops and preserves the inspection/preview artifacts for diagnosis. It never creates organizer operations or modifies the source PSD.
+
+The agent then reads the composite and every non-background isolated preview, completes the classification work template, and discusses any uncertain or consequential changes with the user. Classification and organization remain separate: a `test_artifact` label is not permission to hide or delete anything.
+
+After the user-reviewed template is complete, finalize it and create the organizer-plan draft. The `create-organize-plan-draft` action already performs strict classification validation internally; do not run `validate-psd-classification` as a redundant pre-step unless diagnosing a specific report.
+
+### Individual inspection (targeted diagnostics only)
 
 ~~~powershell
 python scripts/ps_sci_toolkit.py --action inspect-psd `
@@ -510,7 +539,7 @@ Never propose moving a layer solely because its name looks like a panel/image. P
 
 ## Existing PSD visual preview index
 
-After `inspect_psd` returns the ordered layer tree, use `preview_psd_layers` to understand the actual visual content before proposing structural changes.
+The recommended `prepare-existing-psd` action runs this as part of the combined intake and reuses the inspection inventory. Use the standalone `preview_psd_layers` action only for targeted diagnostics or when a separate preview set is genuinely needed. Its Python API accepts `inspection_report` so callers that already inspected the same PSD can avoid repeating that inspection.
 
 ~~~powershell
 python scripts/ps_sci_toolkit.py --action preview-psd-layers `
