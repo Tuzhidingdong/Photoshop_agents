@@ -6751,6 +6751,159 @@ def validate_psd_classification(
     )
 
 
+def _assess_organize_plan_risk(
+    operations: list[Dict[str, Any]],
+    inspection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build a user-facing risk and approval summary for a validated organizer plan."""
+    source_layers = {
+        layer["node_key"]: layer for layer in inspection.get("layers", [])
+    }
+    created_groups = {
+        operation["key"]: operation
+        for operation in operations
+        if operation["action"] == "create_group"
+    }
+
+    def layer_label(key: str) -> str:
+        layer = source_layers[key]
+        return str(layer.get("path") or key)
+
+    def container_label(key: str) -> str:
+        if key == "root":
+            return "root (document)"
+        if key in created_groups:
+            group = created_groups[key]
+            parent = container_label(group.get("parent", "root"))
+            return parent + "/" + group["name"] + " (new group)"
+        return layer_label(key)
+
+    risk_order = {"low": 1, "high": 2, "critical": 3}
+    reviews: list[Dict[str, Any]] = []
+    counts = {"low": 0, "high": 0, "critical": 0}
+
+    for index, operation in enumerate(operations, start=1):
+        action = operation["action"]
+        review: Dict[str, Any] = {
+            "operation_index": index,
+            "action": action,
+            "risk_level": "low",
+            "visual_impact": "none_expected",
+            "approval_requirement": "included_in_full_plan_approval",
+        }
+
+        if action == "create_group":
+            review.update({
+                "target": operation["name"],
+                "before": "No group exists at the proposed location.",
+                "after": "Create an empty group under " + container_label(operation["parent"]) + ".",
+                "reason": (
+                    "An empty group changes the editable layer hierarchy but does not "
+                    "move or alter existing pixels."
+                ),
+            })
+        elif action == "rename_layer":
+            layer = source_layers[operation["target"]]
+            review.update({
+                "target": layer_label(operation["target"]),
+                "before": layer["name"],
+                "after": operation["new_name"],
+                "reason": (
+                    "Renaming does not directly change rendered pixels, but external "
+                    "scripts or references that depend on the old layer name may need updating."
+                ),
+            })
+        elif action == "move_layer":
+            layer = source_layers[operation["target"]]
+            review.update({
+                "risk_level": "high",
+                "visual_impact": "possible",
+                "approval_requirement": "explicitly_reviewed_in_full_plan_approval",
+                "target": layer_label(operation["target"]),
+                "before": "Parent: " + str(layer["parent_key"]) + "; stack index: " + str(layer["stack_index"]),
+                "after": (
+                    "Parent: " + container_label(operation["destination"])
+                    + "; insert at " + operation["position"] + "."
+                ),
+                "reason": (
+                    "Reparenting changes layer context and may affect blend interactions, "
+                    "group-scoped effects, masks, or adjustment behavior even when clipping-chain "
+                    "moves are rejected."
+                ),
+            })
+        elif action == "reorder_layer":
+            layer = source_layers[operation["target"]]
+            anchor = source_layers[operation["relative_to"]]
+            review.update({
+                "risk_level": "high",
+                "visual_impact": "possible",
+                "approval_requirement": "explicitly_reviewed_in_full_plan_approval",
+                "target": layer_label(operation["target"]),
+                "before": "Stack index: " + str(layer["stack_index"]),
+                "after": (
+                    operation["position"] + " " + layer_label(operation["relative_to"])
+                    + " (reference: " + anchor["name"] + ")."
+                ),
+                "reason": (
+                    "Changing stacking order may alter occlusion, blend results, and the "
+                    "final composite."
+                ),
+            })
+        elif action == "set_visibility":
+            layer = source_layers[operation["target"]]
+            review.update({
+                "risk_level": "critical",
+                "visual_impact": "direct",
+                "approval_requirement": "must_be_explicitly_acknowledged",
+                "target": layer_label(operation["target"]),
+                "before": "visible" if layer["visible"] else "hidden",
+                "after": "visible" if operation["visible"] else "hidden",
+                "reason": (
+                    "Visibility directly changes which content contributes to the rendered figure. "
+                    "This change must be singled out in the approval request."
+                ),
+            })
+
+        counts[review["risk_level"]] += 1
+        reviews.append(review)
+
+    overall = max(counts, key=lambda level: risk_order[level])
+    if counts["critical"]:
+        approval_text = (
+            "Show every visibility change in a separate, unmistakable section. "
+            "The user must explicitly acknowledge those exact visibility changes; "
+            "a generic approval of 'organization' is insufficient."
+        )
+    elif counts["high"]:
+        approval_text = (
+            "Show each move/reorder with its exact source, destination or relative position, "
+            "and possible visual consequences. Obtain approval for the complete listed plan."
+        )
+    else:
+        approval_text = (
+            "Show the consolidated rename/grouping list and obtain approval for the complete plan."
+        )
+
+    return {
+        "schema_version": 1,
+        "overall_level": overall,
+        "counts": counts,
+        "requires_user_approval": True,
+        "approval_guidance": approval_text,
+        "operation_reviews": reviews,
+        "prohibited_automatic_actions": [
+            "delete_layer",
+            "merge_layers",
+            "flatten",
+            "rasterize",
+            "crop",
+            "resize",
+            "transform",
+            "edit_pixel_content",
+        ],
+    }
+
+
 def create_organize_plan_draft(
     input_psd: str | Path,
     inspection_report: Dict[str, Any] | str | Path,
@@ -6797,6 +6950,10 @@ def create_organize_plan_draft(
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     role_counts = validation["role_counts"]
+    risk_assessment = _assess_organize_plan_risk(
+        normalized["operations"],
+        inspection,
+    )
     draft = {
         "schema_version": 1,
         "plan_type": "user_review_required",
@@ -6808,6 +6965,7 @@ def create_organize_plan_draft(
         "classification_sha256": validation["classification_sha256"],
         "classification_role_counts": role_counts,
         "classification_warnings": validation["warnings"],
+        "risk_assessment": risk_assessment,
         "operations": normalized["operations"],
         "verify_refs": normalized["verify_refs"],
     }
@@ -6828,6 +6986,7 @@ def create_organize_plan_draft(
         "operation_count": len(normalized["operations"]),
         "role_counts": role_counts,
         "warnings": validation["warnings"],
+        "risk_assessment": risk_assessment,
         "plan_sha256": _sha256_file(output_file),
         "plan": draft,
     }
