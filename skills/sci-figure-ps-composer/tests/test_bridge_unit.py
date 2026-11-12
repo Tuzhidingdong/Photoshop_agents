@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 from pathlib import Path
 
 from PIL import Image
@@ -13,6 +17,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from ps_sci_toolkit import (
     PhotoshopBridge,
     PhotoshopBridgeError,
+    main,
     calculate_grid_layout,
     cm_to_pixels,
     compose_grid,
@@ -25,6 +30,19 @@ from ps_sci_toolkit import (
     export_figure,
     _inspect_export_raster,
     preflight_figure,
+    inspect_psd,
+    _validate_organize_plan,
+    apply_organize_plan,
+    _parse_organize_verify_records,
+    _build_apply_organize_plan_jsx,
+    _build_preview_psd_layers_jsx,
+    validate_psd_classification,
+    create_psd_classification_template,
+    finalize_psd_classification_template,
+    _suggest_psd_semantic_role,
+    create_organize_plan_draft,
+    _parse_psd_preview_records,
+    preview_psd_layers,
 )
 
 
@@ -52,6 +70,18 @@ class PhotoshopBridgeUnitTests(unittest.TestCase):
 
         self.assertEqual(result, "42")
         self.assertEqual(app.calls, ["1 + 1;"])
+
+    def test_interactive_execution_mode_allows_photoshop_dialogs(self):
+        app = FakePhotoshopApplication(["ok"])
+        bridge = PhotoshopBridge(app=app, execution_mode="interactive")
+
+        self.assertEqual(bridge.execute_jsx("app.displayDialogs = DialogModes.NO;"), "ok")
+        self.assertIn("DialogModes.ALL", app.calls[0])
+        self.assertNotIn("DialogModes.NO", app.calls[0])
+
+    def test_execution_mode_rejects_unknown_values(self):
+        with self.assertRaises(ValueError):
+            PhotoshopBridge(app=FakePhotoshopApplication(), execution_mode="headless")
 
     def test_execute_jsx_rejects_empty_source(self):
         bridge = PhotoshopBridge(app=FakePhotoshopApplication())
@@ -1053,6 +1083,1297 @@ def _make_preflight_response(*, missing_first_smart_object=False):
         930, 670, 972, 680,
     ]))
     return "SCI_PS_PREFLIGHT\tOK\t" + "\n".join(rows)
+
+
+
+class FakeInspectBridge:
+    def __init__(self, response, callback=None):
+        self.response = response
+        self.callback = callback
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        if self.callback is not None:
+            self.callback(jsx)
+        return self.response
+
+
+def _encode_inspection_record(values):
+    from urllib.parse import quote
+    return "|".join(quote(str(value), safe="-_.!~*'()") for value in values)
+
+
+def _make_inspection_response():
+    rows = [
+        _encode_inspection_record(["DOC", "Legacy Figure", 1200, 800, 300, "RGB", "sRGB IEC61966-2.1"]),
+        _encode_inspection_record(["COUNT", 5]),
+        _encode_inspection_record([
+            "LAYER", "root/L0", "root", 0, 0, "ArtLayer", "Title",
+            "LayerKind.TEXT", True, 100, "BlendMode.NORMAL", False, False,
+            False, False, False, 300, 40, 900, 90, "A figure title",
+            "ArialMT", 16, "#000000",
+            "Legacy Figure/Title",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/G1", "root", 1, 0, "LayerSet", "Old Group",
+            "LayerSet", True, 100, "BlendMode.PASS_THROUGH", False, False,
+            False, False, False, 100, 100, 700, 700, "", "", "", "",
+            "Legacy Figure/Old Group",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/G1/L0", "root/G1", 0, 1, "ArtLayer", "Caption copy",
+            "LayerKind.TEXT", True, 100, "BlendMode.NORMAL", False, False,
+            False, False, False, 120, 120, 400, 170, "Electrochemical data",
+            "ArialMT", 8, "#000000",
+            "Legacy Figure/Old Group/Caption copy",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/L2", "root", 2, 0, "ArtLayer", "Micrograph",
+            "LayerKind.SMARTOBJECT", True, 100, "BlendMode.NORMAL", False,
+            False, False, False, False, 720, 100, 1180, 700, "", "", "", "",
+            "Legacy Figure/Micrograph",
+        ]),
+        _encode_inspection_record([
+            "LAYER", "root/L3", "root", 3, 0, "ArtLayer", "Background",
+            "LayerKind.NORMAL", True, 100, "BlendMode.NORMAL", True, True, True,
+            True, False, 0, 0, 1200, 800, "", "", "", "",
+            "Legacy Figure/Background",
+        ]),
+    ]
+    # The mixed layer collection is front-to-back: the locked Background
+    # layer remains at the final index.
+    return "SCI_PS_INSPECT_PSD\tOK\t" + "\n".join(rows)
+
+class InspectPsdUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_inspect_psd_returns_ordered_nested_layer_tree(self):
+        bridge = FakeInspectBridge(_make_inspection_response())
+        result = inspect_psd(self.input_psd, bridge=bridge)
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["layer_count"], 5)
+        self.assertEqual(result["group_count"], 1)
+        self.assertEqual(result["text_layer_count"], 2)
+        self.assertEqual(result["smart_object_count"], 1)
+        self.assertEqual(result["layers"][1]["node_key"], "root/G1")
+        self.assertEqual(result["layers"][2]["parent_key"], "root/G1")
+        self.assertEqual(result["layers"][2]["text"]["contents"], "Electrochemical data")
+        self.assertEqual(result["layers"][3]["kind"], "LayerKind.SMARTOBJECT")
+        self.assertEqual(len(result["layer_tree_sha256"]), 64)
+        self.assertTrue(result["source_sha256_unchanged"])
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+        self.assertIn("container.layers", bridge.jsx_calls[0])
+        self.assertIn("app.preferences.rulerUnits = previousRulerUnits", bridge.jsx_calls[0])
+        self.assertIn("document_label", bridge.jsx_calls[0])
+        self.assertIn("Legacy.psd", bridge.jsx_calls[0])
+        self.assertIn("sci_insp_", bridge.jsx_calls[0])
+        self.assertNotIn(str(self.input_psd), bridge.jsx_calls[0])
+        self.assertEqual(result["layers"][-1]["name"], "Background")
+        self.assertTrue(result["layers"][-1]["is_background"])
+
+    def test_inspect_psd_can_write_a_new_json_report(self):
+        bridge = FakeInspectBridge(_make_inspection_response())
+        report_path = self.root / "reports" / "Legacy_inspection.json"
+
+        result = inspect_psd(self.input_psd, report_path=report_path, bridge=bridge)
+
+        self.assertEqual(result["report_path"], str(report_path))
+        saved = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["source_sha256"], result["source_sha256"])
+        self.assertEqual(saved["layer_count"], 5)
+        self.assertEqual(saved["report_path"], str(report_path))
+
+    def test_inspect_psd_does_not_overwrite_an_existing_report(self):
+        report_path = self.root / "existing.json"
+        report_path.write_text("keep", encoding="utf-8")
+        bridge = FakeInspectBridge(_make_inspection_response())
+
+        with self.assertRaises(FileExistsError):
+            inspect_psd(self.input_psd, report_path=report_path, bridge=bridge)
+
+        self.assertEqual(report_path.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_inspect_psd_rejects_malformed_layer_record_count(self):
+        response = (
+            "SCI_PS_INSPECT_PSD\tOK\t"
+            + _encode_inspection_record(["DOC", "Bad", 100, 100, 300, "RGB", ""])
+            + "\n"
+            + _encode_inspection_record(["COUNT", 2])
+        )
+        bridge = FakeInspectBridge(response)
+        with self.assertRaises(ValueError):
+            inspect_psd(self.input_psd, bridge=bridge)
+
+
+
+
+class FakePreviewBridge:
+    def __init__(self, inspection_response=None):
+        self.inspection_response = inspection_response or _make_inspection_response()
+        self.jsx_calls = []
+
+    def execute_jsx(self, jsx):
+        self.jsx_calls.append(jsx)
+        if "SCI_PS_INSPECT_PSD" in jsx:
+            return self.inspection_response
+
+        import re
+        match = re.search(r"var cfg = (\{.*\});", jsx)
+        if not match:
+            raise AssertionError("Preview JSX configuration was not embedded.")
+        config = json.loads(match.group(1))
+        from PIL import Image
+
+        Image.new("RGBA", (128, 96), (245, 245, 245, 255)).save(
+            Path(config["output_dir"]) / "composite.png",
+            format="PNG",
+        )
+        records = []
+        for item in config["items"]:
+            preview_path = Path(config["output_dir"]) / item["file_name"]
+            Image.new("RGBA", (64, 48), (40, 90, 140, 220)).save(preview_path, format="PNG")
+            records.append(_encode_inspection_record([
+                "PREVIEW", item["node_key"], item["file_name"], "OK", 64, 48, ""
+            ]))
+        return (
+            "SCI_PS_PREVIEW_PSD\tOK\t"
+            + str(len(config["items"]))
+            + "\t"
+            + "\n".join(records)
+        )
+
+
+class PreviewPsdLayersTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_preview_psd_layers_creates_contact_sheet_and_manifest(self):
+        bridge = FakePreviewBridge()
+        output_dir = self.root / "layer_previews"
+
+        result = preview_psd_layers(
+            self.input_psd,
+            output_dir,
+            bridge=bridge,
+            thumbnail_width_px=256,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["preview_count"], 4)
+        self.assertEqual(result["successful_count"], 4)
+        self.assertEqual(result["failed_count"], 0)
+        self.assertEqual(result["skipped_backgrounds"], ["root/L3"])
+        self.assertEqual(result["inspection_layer_count"], 5)
+        self.assertEqual(result["all_node_count"], 5)
+        self.assertEqual(result["eligible_non_background_node_count"], 4)
+        self.assertEqual(result["previewed_non_background_node_count"], 4)
+        self.assertTrue(result["full_visual_coverage"])
+        self.assertEqual(result["missing_preview_node_keys"], [])
+        self.assertEqual(result["failed_preview_node_keys"], [])
+        self.assertTrue(Path(result["contact_sheet"]["path"]).is_file())
+        self.assertTrue(Path(result["composite_preview"]).is_file())
+        self.assertTrue(Path(result["report_path"]).is_file())
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+        self.assertTrue(result["source_sha256_unchanged"])
+        self.assertIn("restoreGroupChildren", bridge.jsx_calls[-1])
+        self.assertIn('sourceDoc.duplicate("SCI_PSD_COMPOSITE_PREVIEW"', bridge.jsx_calls[-1])
+        self.assertIn('sourceDoc.duplicate(\n                    "SCI_Layer_Preview_"', bridge.jsx_calls[-1])
+        self.assertTrue(Path(result["composite_preview"]).is_file())
+        self.assertIn("ResampleMethod.BICUBICSHARPER", bridge.jsx_calls[-1])
+        self.assertIn("SaveOptions.DONOTSAVECHANGES", bridge.jsx_calls[-1])
+
+    def test_preview_psd_layers_reuses_supplied_inspection_without_second_inspection(self):
+        inspection = inspect_psd(
+            self.input_psd,
+            bridge=FakeInspectBridge(_make_inspection_response()),
+        )
+        bridge = FakePreviewBridge()
+        output_dir = self.root / "reused_inspection_previews"
+
+        result = preview_psd_layers(
+            self.input_psd,
+            output_dir,
+            inspection_report=inspection,
+            bridge=bridge,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["full_visual_coverage"])
+        self.assertEqual(result["layer_tree_sha256"], inspection["layer_tree_sha256"])
+        self.assertEqual(len(bridge.jsx_calls), 1)
+        self.assertNotIn("SCI_PS_INSPECT_PSD", bridge.jsx_calls[0])
+        self.assertIn("SCI_PS_PREVIEW_PSD", bridge.jsx_calls[0])
+
+    def test_preview_psd_layers_can_select_specific_node_keys(self):
+        bridge = FakePreviewBridge()
+        output_dir = self.root / "selected_previews"
+
+        result = preview_psd_layers(
+            self.input_psd,
+            output_dir,
+            node_keys=["root/G1/L0", "root/L2"],
+            bridge=bridge,
+        )
+
+        self.assertEqual(result["preview_count"], 2)
+        self.assertEqual(
+            [item["node_key"] for item in result["previews"]],
+            ["root/G1/L0", "root/L2"],
+        )
+        self.assertFalse(result["full_visual_coverage"])
+        self.assertEqual(
+            result["missing_preview_node_keys"],
+            ["root/G1", "root/L0"],
+        )
+        self.assertEqual(result["previewed_non_background_node_count"], 2)
+
+    def test_preview_psd_layers_rejects_unknown_or_duplicate_node_keys(self):
+        for keys in (["root/not-found"], ["root/L2", "root/L2"]):
+            bridge = FakePreviewBridge()
+            output_dir = self.root / ("bad_" + str(len(list(self.root.iterdir()))))
+            with self.assertRaises(ValueError):
+                preview_psd_layers(
+                    self.input_psd,
+                    output_dir,
+                    node_keys=keys,
+                    bridge=bridge,
+                )
+
+    def test_preview_psd_layers_rejects_existing_output_directory(self):
+        output_dir = self.root / "existing"
+        output_dir.mkdir()
+        bridge = FakePreviewBridge()
+        with self.assertRaises(FileExistsError):
+            preview_psd_layers(self.input_psd, output_dir, bridge=bridge)
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_preview_jsx_contains_isolation_and_safe_duplicate_workflow(self):
+        jsx = _build_preview_psd_layers_jsx({
+            "input_path": "C:/Temp/source.psd",
+            "output_dir": "C:/Temp/previews",
+            "thumbnail_width_px": 512,
+            "items": [
+                {
+                    "sequence": 1,
+                    "node_key": "root/G0/L1",
+                    "stack_index": 1,
+                    "file_name": "layer_001.png",
+                }
+            ],
+        })
+        self.assertIn("hideAll(previewDoc)", jsx)
+        self.assertIn("setAncestorsVisible(item, previewMap)", jsx)
+        self.assertIn("restoreGroupChildren(sourceLayer, previewLayer)", jsx)
+        self.assertIn("Boolean(sourceLayer.grouped)", jsx)
+        self.assertIn("PNGSaveOptions", jsx)
+        self.assertIn("previewDoc.resizeImage", jsx)
+        self.assertIn("previousRulerUnits", jsx)
+        self.assertIn("previousTypeUnits", jsx)
+
+    def test_preview_record_parser_rejects_duplicate_or_unknown_status(self):
+        good = _encode_inspection_record([
+            "PREVIEW", "root/L0", "layer_001.png", "OK", 64, 48, ""
+        ])
+        duplicate = good + "\n" + good
+        with self.assertRaisesRegex(ValueError, "Duplicate PSD preview node key"):
+            _parse_psd_preview_records(duplicate)
+
+        bad_status = _encode_inspection_record([
+            "PREVIEW", "root/L0", "layer_001.png", "MAYBE", 64, 48, ""
+        ])
+        with self.assertRaisesRegex(ValueError, "Unknown PSD preview status"):
+            _parse_psd_preview_records(bad_status)
+
+
+
+
+def _make_valid_classification(inspection, use_visual_evidence=False):
+    classifications = []
+    for layer in inspection["layers"]:
+        if layer.get("is_background") is True:
+            role = "background"
+            evidence = [{
+                "type": "layer_metadata",
+                "observation": "Photoshop marks this node as the document Background layer.",
+                "fields": {"is_background": True},
+            }]
+        elif layer["typename"] == "LayerSet":
+            role = "panel_group" if layer["name"].startswith("Group_Panel_") else "unknown"
+            evidence = [{
+                "type": "layer_name",
+                "observation": layer["name"],
+            }]
+        elif layer["kind"] == "LayerKind.TEXT":
+            role = "title" if layer["name"] == "Title" else "annotation"
+            evidence = [{
+                "type": "text_content",
+                "observation": layer["text"]["contents"],
+            }]
+        elif layer["kind"] == "LayerKind.SMARTOBJECT":
+            role = "panel_image"
+            if use_visual_evidence:
+                evidence = [{
+                    "type": "visual_preview",
+                    "preview_node_key": layer["node_key"],
+                    "observation": "The isolated preview shows the embedded panel image.",
+                }]
+            else:
+                evidence = [{
+                    "type": "layer_type",
+                    "observation": layer["kind"],
+                }]
+        else:
+            role = "unknown"
+            evidence = [{
+                "type": "layer_type",
+                "observation": layer["kind"],
+            }]
+        classifications.append({
+            "node_key": layer["node_key"],
+            "role": role,
+            "confidence": 0.92 if role != "unknown" else 0.35,
+            "rationale": "Classification is grounded in the recorded layer evidence.",
+            "evidence": evidence,
+        })
+    return {
+        "schema_version": 1,
+        "source_sha256": inspection["source_sha256"],
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "classifications": classifications,
+    }
+
+
+class PsdSemanticClassificationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+        self.inspection = inspect_psd(
+            self.input_psd,
+            bridge=FakeInspectBridge(_make_inspection_response()),
+        )
+        self.inspection_path = self.root / "inspection.json"
+        self.inspection_path.write_text(
+            json.dumps(self.inspection, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.classification = _make_valid_classification(self.inspection)
+        self.classification_path = self.root / "classification.json"
+        self.classification_path.write_text(
+            json.dumps(self.classification, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_native_background_must_use_background_role_and_matching_metadata(self):
+        result = validate_psd_classification(
+            self.input_psd,
+            self.inspection_path,
+            self.classification,
+        )
+        self.assertEqual(result["role_counts"]["background"], 1)
+
+        wrong_role = json.loads(json.dumps(self.classification))
+        background = next(
+            item for item in wrong_role["classifications"]
+            if item["node_key"] == "root/L3"
+        )
+        background["role"] = "unknown"
+        background["confidence"] = 0.35
+        background["evidence"] = [{
+            "type": "layer_type",
+            "observation": "LayerKind.NORMAL",
+        }]
+        with self.assertRaisesRegex(ValueError, "must use role='background'"):
+            validate_psd_classification(
+                self.input_psd, self.inspection_path, wrong_role
+            )
+
+        wrong_flag = json.loads(json.dumps(self.classification))
+        background = next(
+            item for item in wrong_flag["classifications"]
+            if item["node_key"] == "root/L3"
+        )
+        background["evidence"][0]["fields"]["is_background"] = False
+        with self.assertRaisesRegex(ValueError, "does not match inspected value"):
+            validate_psd_classification(
+                self.input_psd, self.inspection_path, wrong_flag
+            )
+
+    def test_role_suggestions_are_conservative_hints_from_multiple_metadata_fields(self):
+        layers = [
+            {
+                "node_key": "root/G0", "parent_key": "root", "name": "Group_Panel_c",
+                "typename": "LayerSet", "kind": "LayerSet", "is_background": False,
+            },
+            {
+                "node_key": "root/G0/L0", "parent_key": "root/G0", "name": "Panel_Label_c",
+                "typename": "ArtLayer", "kind": "LayerKind.TEXT", "is_background": False,
+                "text": {"contents": "c"},
+            },
+            {
+                "node_key": "root/G0/L1", "parent_key": "root/G0", "name": "Image_Panel_c",
+                "typename": "ArtLayer", "kind": "LayerKind.SMARTOBJECT", "is_background": False,
+            },
+            {
+                "node_key": "root/G1", "parent_key": "root", "name": "Group_Panel_a",
+                "typename": "LayerSet", "kind": "LayerSet", "is_background": False,
+            },
+            {
+                "node_key": "root/G1/L0", "parent_key": "root/G1", "name": "Scale_Label_a",
+                "typename": "ArtLayer", "kind": "LayerKind.TEXT", "is_background": False,
+                "text": {"contents": "10 µm"},
+            },
+            {
+                "node_key": "root/G1/L1", "parent_key": "root/G1", "name": "Scale_Bar_a",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": False,
+            },
+            {
+                "node_key": "root/G1/L2", "parent_key": "root/G1", "name": "Scale_Bar_Outline_a",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": False,
+            },
+            {
+                "node_key": "root/G2", "parent_key": "root", "name": "Stage5_Test_Outer",
+                "typename": "LayerSet", "kind": "LayerSet", "is_background": False,
+            },
+            {
+                "node_key": "root/G3", "parent_key": "root", "name": "Background",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": False,
+            },
+            {
+                "node_key": "root/L4", "parent_key": "root", "name": "背景",
+                "typename": "ArtLayer", "kind": "LayerKind.NORMAL", "is_background": True,
+            },
+        ]
+        layer_by_key = {layer["node_key"]: layer for layer in layers}
+        expected = {
+            "root/G0": "panel_group",
+            "root/G0/L0": "panel_label",
+            "root/G0/L1": "panel_image",
+            "root/G1/L0": "scale_label",
+            "root/G1/L1": "scale_bar",
+            "root/G1/L2": "scale_bar",
+            "root/G2": "test_artifact",
+            "root/G3": "unknown",
+            "root/L4": "background",
+        }
+
+        for key, expected_role in expected.items():
+            with self.subTest(node_key=key):
+                suggestion = _suggest_psd_semantic_role(layer_by_key[key], layer_by_key)
+                self.assertEqual(suggestion["candidate_role"], expected_role)
+                self.assertFalse(suggestion["is_final_classification"])
+                if expected_role != "background":
+                    self.assertTrue(suggestion["requires_visual_confirmation"])
+
+        mismatched_label = dict(layer_by_key["root/G0/L0"])
+        mismatched_label["text"] = {"contents": "a"}
+        self.assertEqual(
+            _suggest_psd_semantic_role(mismatched_label, layer_by_key)["candidate_role"],
+            "unknown",
+        )
+
+        mismatched_image = dict(layer_by_key["root/G0/L1"])
+        mismatched_image["parent_key"] = "root/G1"
+        self.assertEqual(
+            _suggest_psd_semantic_role(mismatched_image, layer_by_key)["candidate_role"],
+            "unknown",
+        )
+
+    def test_create_psd_classification_template_covers_all_nodes_without_guessing(self):
+        output = self.root / "classification_work_template.json"
+        result = create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            output,
+        )
+        template = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["template_only"])
+        self.assertTrue(result["requires_agent_review"])
+        self.assertEqual(result["node_count"], 5)
+        self.assertEqual(result["background_count"], 1)
+        self.assertEqual(result["non_background_node_count"], 4)
+        self.assertFalse(result["full_visual_coverage"])
+        self.assertTrue(template["template_only"])
+        self.assertEqual(len(template["nodes"]), 5)
+
+        background = next(
+            item for item in template["nodes"]
+            if item["node_key"] == "root/L3"
+        )
+        self.assertEqual(background["classification_seed"]["role"], "background")
+        self.assertEqual(
+            background["classification_seed"]["evidence"][0]["fields"],
+            {"is_background": True},
+        )
+
+        pending = next(
+            item for item in template["nodes"]
+            if item["node_key"] == "root/G1/L0"
+        )
+        self.assertEqual(pending["classification_seed"]["role"], "unknown")
+        self.assertEqual(pending["classification_seed"]["status"], "pending_agent_review")
+        self.assertIsNone(pending["classification_seed"]["confidence"])
+        self.assertEqual(pending["classification_seed"]["evidence"], [])
+        self.assertEqual(pending["role_suggestion"]["candidate_role"], "unknown")
+        self.assertFalse(pending["role_suggestion"]["is_final_classification"])
+        self.assertIn(
+            "text_content",
+            [item["type"] for item in pending["available_evidence"]],
+        )
+        self.assertTrue(template["classification_policy"]["do_not_infer_scientific_meaning_from_layer_names_alone"])
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+
+    def test_classification_template_counts_only_non_background_preview_targets(self):
+        preview_dir = self.root / "template_previews"
+        preview_dir.mkdir()
+        (preview_dir / "composite.png").write_bytes(b"composite")
+        preview_items = []
+        non_background = [
+            layer for layer in self.inspection["layers"]
+            if not layer["is_background"]
+        ]
+        for index, layer in enumerate(non_background, start=1):
+            filename = "layer_" + str(index).zfill(3) + ".png"
+            (preview_dir / filename).write_bytes(b"preview")
+            preview_items.append({
+                "node_key": layer["node_key"],
+                "file_name": filename,
+                "status": "OK",
+            })
+        preview_manifest = {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_dir),
+            "composite_preview": str(preview_dir / "composite.png"),
+            "previews": preview_items,
+        }
+
+        output = self.root / "full_coverage_template.json"
+        result = create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            output,
+            preview_report=preview_manifest,
+        )
+        saved = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["full_visual_coverage"])
+        self.assertEqual(result["preview_success_count"], 4)
+        self.assertEqual(result["preview_failure_count"], 0)
+        self.assertEqual(saved["summary"]["missing_preview_node_keys"], [])
+        background = next(
+            node for node in saved["nodes"] if node["is_background"]
+        )
+        self.assertEqual(
+            background["isolated_preview"]["status"],
+            "SKIPPED_BACKGROUND",
+        )
+
+        partial_manifest = json.loads(json.dumps(preview_manifest))
+        partial_manifest["previews"].pop()
+        partial_output = self.root / "partial_coverage_template.json"
+        partial = create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            partial_output,
+            preview_report=partial_manifest,
+        )
+        self.assertFalse(partial["full_visual_coverage"])
+        self.assertEqual(partial["preview_success_count"], 3)
+        self.assertEqual(partial["preview_failure_count"], 0)
+
+    def _make_reviewed_template_with_full_previews(self):
+        preview_dir = self.root / "finalize_previews"
+        preview_dir.mkdir()
+        composite = preview_dir / "composite.png"
+        contact = preview_dir / "layer_contact_sheet.png"
+        composite.write_bytes(b"composite")
+        contact.write_bytes(b"contact")
+        previews = []
+        for index, layer in enumerate(self.inspection["layers"], start=1):
+            if layer["is_background"]:
+                continue
+            filename = "layer_" + str(index).zfill(3) + ".png"
+            (preview_dir / filename).write_bytes(b"isolated-preview")
+            previews.append({
+                "node_key": layer["node_key"],
+                "file_name": filename,
+                "status": "OK",
+            })
+        preview_manifest = {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_dir),
+            "composite_preview": str(composite),
+            "contact_sheet": {"path": str(contact)},
+            "previews": previews,
+        }
+        preview_report_path = self.root / "finalize_preview_report.json"
+        preview_report_path.write_text(
+            json.dumps(preview_manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        template_path = self.root / "finalize_work_template.json"
+        create_psd_classification_template(
+            self.input_psd,
+            self.inspection_path,
+            template_path,
+            preview_report=preview_report_path,
+        )
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+        for node in template["nodes"]:
+            if node["is_background"]:
+                continue
+            preview_item = next(
+                item for item in previews if item["node_key"] == node["node_key"]
+            )
+            node["classification_seed"] = {
+                "role": "unknown",
+                "confidence": 0.2,
+                "rationale": "The isolated preview was reviewed; the scientific role remains uncertain.",
+                "evidence": [{
+                    "type": "visual_preview",
+                    "preview_node_key": node["node_key"],
+                    "observation": "The isolated preview was opened and reviewed; no reliable semantic role can be assigned.",
+                }],
+                "status": "agent_reviewed",
+            }
+        template_path.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return template_path, template
+
+    def test_finalize_reviewed_classification_template_writes_valid_report(self):
+        template_path, template = self._make_reviewed_template_with_full_previews()
+        template_bytes_before = template_path.read_bytes()
+        output = self.root / "final_classification.json"
+
+        result = finalize_psd_classification_template(template_path, output)
+        report = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["classification_count"], 5)
+        self.assertEqual(result["role_counts"]["background"], 1)
+        self.assertEqual(result["role_counts"]["unknown"], 4)
+        self.assertTrue(result["template_preserved"])
+        self.assertTrue(result["requires_user_approval_for_organization"])
+        self.assertFalse(result["organizer_operations_created"])
+        self.assertEqual(len(report["classifications"]), 5)
+        self.assertEqual(
+            report["source_sha256"],
+            template["source_sha256"],
+        )
+        self.assertEqual(template_path.read_bytes(), template_bytes_before)
+        self.assertEqual(self.input_psd.read_bytes(), b"unchanged-legacy-psd")
+
+    def test_finalize_rejects_unreviewed_nodes_and_missing_visual_evidence(self):
+        template_path, template = self._make_reviewed_template_with_full_previews()
+        output = self.root / "must_not_exist.json"
+
+        pending = next(
+            node for node in template["nodes"] if not node["is_background"]
+        )
+        pending["classification_seed"]["status"] = "pending_agent_review"
+        template_path.write_text(json.dumps(template), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "has not completed the required review state"):
+            finalize_psd_classification_template(template_path, output)
+        self.assertFalse(output.exists())
+
+        pending["classification_seed"]["status"] = "agent_reviewed"
+        pending["classification_seed"]["evidence"] = [{
+            "type": "layer_name",
+            "observation": pending["name"],
+        }]
+        template_path.write_text(json.dumps(template), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "requires reviewed visual_preview evidence"):
+            finalize_psd_classification_template(template_path, output)
+        self.assertFalse(output.exists())
+
+    def test_classification_finalization_cli_does_not_initialize_photoshop_com(self):
+        template_path, _ = self._make_reviewed_template_with_full_previews()
+        output = self.root / "cli_final_classification.json"
+        captured = StringIO()
+
+        with patch(
+            "ps_sci_toolkit.PhotoshopBridge",
+            side_effect=AssertionError("Pure classification finalization must not connect to Photoshop."),
+        ):
+            with redirect_stdout(captured):
+                exit_code = main([
+                    "--action", "finalize-psd-classification-template",
+                    "--classification-template", str(template_path),
+                    "--output", str(output),
+                    "--execution-mode", "quiet",
+                    "--json",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(output.is_file())
+        self.assertTrue(json.loads(captured.getvalue())["passed"])
+
+    def test_finalize_requires_complete_preview_coverage_and_preserves_template(self):
+        template_path, template = self._make_reviewed_template_with_full_previews()
+        template["summary"]["full_visual_coverage"] = False
+        template_path.write_text(json.dumps(template), encoding="utf-8")
+        output = self.root / "incomplete_classification.json"
+
+        with self.assertRaisesRegex(ValueError, "complete isolated-preview coverage"):
+            finalize_psd_classification_template(template_path, output)
+        self.assertFalse(output.exists())
+        self.assertTrue(template_path.is_file())
+
+    def test_classification_template_rejects_stale_inspection_hash(self):
+        stale = json.loads(json.dumps(self.inspection))
+        stale["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "does not match inspection_report"):
+            create_psd_classification_template(
+                self.input_psd,
+                stale,
+                self.root / "stale_template.json",
+            )
+
+    def test_layer_name_and_layer_type_evidence_must_match_inspection(self):
+        wrong_name = _make_valid_classification(self.inspection)
+        named_item = next(
+            item for item in wrong_name["classifications"]
+            if item["evidence"][0]["type"] == "layer_name"
+        )
+        named_item["evidence"][0]["observation"] = "Invented group name"
+        with self.assertRaisesRegex(ValueError, "exact inspected layer name"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_name)
+
+        wrong_type = _make_valid_classification(self.inspection)
+        smart = next(
+            item for item in wrong_type["classifications"]
+            if item["role"] == "panel_image"
+        )
+        smart["evidence"] = [{"type": "layer_type", "observation": "LayerKind.TEXT"}]
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_type)
+
+    def test_text_and_geometry_evidence_must_match_inspected_values(self):
+        wrong_text = _make_valid_classification(self.inspection)
+        text_item = next(
+            item for item in wrong_text["classifications"]
+            if item["role"] == "title"
+        )
+        text_item["evidence"][0]["observation"] = "Text that is not in the layer"
+        with self.assertRaisesRegex(ValueError, "quote text actually present"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_text)
+
+        wrong_geometry = _make_valid_classification(self.inspection)
+        group = next(
+            item for item in wrong_geometry["classifications"]
+            if item["role"] == "unknown"
+        )
+        group["evidence"] = [{
+            "type": "geometry",
+            "observation": "The bounds identify the proposed panel.",
+            "bounds_px": [0, 0, 1, 1],
+        }]
+        with self.assertRaisesRegex(ValueError, "bounds_px do not match"):
+            validate_psd_classification(self.input_psd, self.inspection_path, wrong_geometry)
+
+    def test_validate_classification_checks_every_node_and_evidence(self):
+        result = validate_psd_classification(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["layer_count"], 5)
+        self.assertEqual(result["classified_count"], 5)
+        self.assertEqual(result["role_counts"]["unknown"], 1)
+        self.assertEqual(result["role_counts"]["background"], 1)
+        self.assertEqual(result["role_counts"]["title"], 1)
+        self.assertEqual(len(result["classification_sha256"]), 64)
+        self.assertTrue(result["source_sha256"] == self.inspection["source_sha256"])
+
+    def test_validate_classification_checks_visual_evidence_against_preview_manifest(self):
+        preview_dir = self.root / "previews"
+        preview_dir.mkdir()
+        image_path = preview_dir / "layer_001.png"
+        image_path.write_bytes(b"fake-png")
+        composite_path = preview_dir / "composite.png"
+        composite_path.write_bytes(b"fake-composite")
+        contact_path = preview_dir / "layer_contact_sheet.png"
+        contact_path.write_bytes(b"fake-contact")
+        layer = next(x for x in self.inspection["layers"] if x["kind"] == "LayerKind.SMARTOBJECT")
+        preview_report = {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "preview_dir": str(preview_dir),
+            "composite_preview": str(composite_path),
+            "contact_sheet": {"path": str(contact_path)},
+            "previews": [{
+                "node_key": layer["node_key"],
+                "file_name": "layer_001.png",
+                "status": "OK",
+            }],
+        }
+        preview_path = self.root / "preview_report.json"
+        preview_path.write_text(json.dumps(preview_report), encoding="utf-8")
+        visual_classification = _make_valid_classification(
+            self.inspection, use_visual_evidence=True
+        )
+        result = validate_psd_classification(
+            self.input_psd,
+            self.inspection_path,
+            visual_classification,
+            preview_report=preview_path,
+        )
+        self.assertTrue(result["passed"])
+
+    def test_validate_classification_rejects_stale_hashes_and_missing_nodes(self):
+        stale = json.loads(json.dumps(self.classification))
+        stale["source_sha256"] = "0" * 64
+        stale_path = self.root / "stale.json"
+        stale_path.write_text(json.dumps(stale), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            validate_psd_classification(self.input_psd, self.inspection_path, stale_path)
+
+        missing = json.loads(json.dumps(self.classification))
+        missing["classifications"].pop()
+        missing_path = self.root / "missing.json"
+        missing_path.write_text(json.dumps(missing), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "every inspected node"):
+            validate_psd_classification(self.input_psd, self.inspection_path, missing_path)
+
+    def test_validate_classification_rejects_unknown_nodes_duplicate_roles_and_bad_confidence(self):
+        cases = []
+        unknown = json.loads(json.dumps(self.classification))
+        unknown["classifications"][0]["node_key"] = "root/not-real"
+        cases.append((unknown, "unknown node_key"))
+        duplicate = json.loads(json.dumps(self.classification))
+        duplicate["classifications"][1]["node_key"] = duplicate["classifications"][0]["node_key"]
+        cases.append((duplicate, "Duplicate classification"))
+        bad_confidence = json.loads(json.dumps(self.classification))
+        bad_confidence["classifications"][0]["confidence"] = 1.5
+        cases.append((bad_confidence, "confidence"))
+        for index, (item, message) in enumerate(cases):
+            path = self.root / ("invalid_" + str(index) + ".json")
+            path.write_text(json.dumps(item), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, message):
+                validate_psd_classification(self.input_psd, self.inspection_path, path)
+
+    def test_visual_evidence_requires_a_successful_matching_preview(self):
+        item = _make_valid_classification(self.inspection, use_visual_evidence=True)
+        with self.assertRaisesRegex(ValueError, "no successful preview"):
+            validate_psd_classification(
+                self.input_psd,
+                self.inspection_path,
+                item,
+                preview_report={
+                    "schema_version": 1,
+                    "source_sha256": self.inspection["source_sha256"],
+                    "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+                    "preview_dir": str(self.root),
+                    "previews": [],
+                },
+            )
+
+    def test_text_evidence_must_reference_a_native_text_layer(self):
+        item = json.loads(json.dumps(self.classification))
+        smart = next(x for x in item["classifications"] if x["role"] == "panel_image")
+        smart["evidence"] = [{
+            "type": "text_content",
+            "observation": "This is not a text layer.",
+        }]
+        with self.assertRaisesRegex(ValueError, "native text layer"):
+            validate_psd_classification(self.input_psd, self.inspection_path, item)
+
+    def test_plan_draft_requires_valid_classification_and_operations_and_is_unapproved(self):
+        output = self.root / "organize_plan_draft.json"
+        operations = [{
+            "action": "create_group",
+            "key": "review_group",
+            "name": "Review_Group",
+            "parent": "root",
+        }]
+        result = create_organize_plan_draft(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+            operations,
+            output,
+        )
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["requires_user_approval"])
+        self.assertFalse(result["approved"])
+        saved = json.loads(output.read_text(encoding="utf-8"))
+        self.assertTrue(saved["requires_user_approval"])
+        self.assertFalse(saved["approved"])
+        self.assertEqual(saved["operations"][0]["action"], "create_group")
+        self.assertEqual(saved["source_sha256"], self.inspection["source_sha256"])
+
+    def test_plan_draft_reports_risk_levels_and_explicit_visibility_acknowledgement(self):
+        output = self.root / "risk_assessed_plan.json"
+        operations = [
+            {"action": "create_group", "key": "review_group", "name": "Review_Group", "parent": "root"},
+            {
+                "action": "rename_layer",
+                "target": "root/G1",
+                "expected_name": "Old Group",
+                "new_name": "Legacy_Source_Group",
+            },
+            {
+                "action": "move_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "destination": "review_group",
+                "position": "end",
+            },
+            {
+                "action": "reorder_layer",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "relative_to": "root/L0",
+                "relative_expected_name": "Title",
+                "position": "before",
+            },
+            {
+                "action": "set_visibility",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "visible": False,
+            },
+        ]
+        result = create_organize_plan_draft(
+            self.input_psd,
+            self.inspection_path,
+            self.classification_path,
+            operations,
+            output,
+        )
+
+        risk = result["risk_assessment"]
+        saved = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(risk["overall_level"], "critical")
+        self.assertEqual(risk["counts"], {"low": 2, "high": 2, "critical": 1})
+        self.assertTrue(risk["requires_user_approval"])
+        self.assertIn("explicitly acknowledge", risk["approval_guidance"])
+        self.assertEqual(saved["risk_assessment"], risk)
+
+        reviews = risk["operation_reviews"]
+        self.assertEqual([item["risk_level"] for item in reviews],
+                         ["low", "low", "high", "high", "critical"])
+        visibility = reviews[-1]
+        self.assertEqual(visibility["visual_impact"], "direct")
+        self.assertEqual(visibility["before"], "visible")
+        self.assertEqual(visibility["after"], "hidden")
+        self.assertEqual(
+            visibility["approval_requirement"],
+            "must_be_explicitly_acknowledged",
+        )
+        self.assertIn("delete_layer", risk["prohibited_automatic_actions"])
+
+    def test_plan_draft_rejects_unsafe_operations_and_existing_output(self):
+        output = self.root / "unsafe_plan.json"
+        unsafe = [{
+            "action": "delete_layer",
+            "target": "root/G1",
+        }]
+        with self.assertRaisesRegex(ValueError, "Unsupported organizer action"):
+            create_organize_plan_draft(
+                self.input_psd,
+                self.inspection_path,
+                self.classification_path,
+                unsafe,
+                output,
+            )
+        output.write_text("preserve", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            create_organize_plan_draft(
+                self.input_psd,
+                self.inspection_path,
+                self.classification_path,
+                [{"action": "create_group", "key": "g", "name": "G", "parent": "root"}],
+                output,
+            )
+        self.assertEqual(output.read_text(encoding="utf-8"), "preserve")
+
+
+
+class OrganizePlanValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.input_psd = self.root / "Legacy.psd"
+        self.input_psd.write_bytes(b"unchanged-legacy-psd")
+        self.inspection = inspect_psd(
+            self.input_psd,
+            bridge=FakeInspectBridge(_make_inspection_response()),
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def plan(self, operations):
+        return {
+            "schema_version": 1,
+            "source_sha256": self.inspection["source_sha256"],
+            "layer_tree_sha256": self.inspection["layer_tree_sha256"],
+            "operations": operations,
+        }
+
+    def test_valid_plan_can_create_group_rename_move_reorder_and_set_visibility(self):
+        plan = self.plan([
+            {"action": "create_group", "key": "panel_a", "name": "Panel A", "parent": "root"},
+            {
+                "action": "rename_layer",
+                "target": "root/G1",
+                "expected_name": "Old Group",
+                "new_name": "Legacy Source Group",
+            },
+            {
+                "action": "move_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "destination": "panel_a",
+                "position": "end",
+            },
+            {
+                "action": "reorder_layer",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "relative_to": "root/L0",
+                "relative_expected_name": "Title",
+                "position": "before",
+            },
+            {
+                "action": "set_visibility",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "visible": False,
+            },
+        ])
+
+        normalized = _validate_organize_plan(plan, self.inspection)
+
+        self.assertEqual(len(normalized["operations"]), 5)
+        self.assertIn("panel_a", normalized["created_groups"])
+        identities = {item["identity"] for item in normalized["verify_refs"]}
+        self.assertIn("group:panel_a", identities)
+        self.assertIn("source:root/G1/L0", identities)
+
+    def test_plan_rejects_stale_source_hash_or_layer_tree(self):
+        stale_hash = self.plan([
+            {"action": "rename_layer", "target": "root/G1", "expected_name": "Old Group", "new_name": "New"}
+        ])
+        stale_hash["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            _validate_organize_plan(stale_hash, self.inspection)
+
+        stale_tree = self.plan([
+            {"action": "rename_layer", "target": "root/G1", "expected_name": "Old Group", "new_name": "New"}
+        ])
+        stale_tree["layer_tree_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "layer_tree_sha256"):
+            _validate_organize_plan(stale_tree, self.inspection)
+
+    def test_plan_rejects_unapproved_or_destructive_operation_types(self):
+        with self.assertRaises(PermissionError):
+            apply_organize_plan(
+                self.input_psd,
+                self.plan([{"action": "delete_layer", "target": "root/G1"}]),
+                self.root / "out.psd",
+                approved=False,
+                bridge=FakeInspectBridge(_make_inspection_response()),
+            )
+
+        with self.assertRaisesRegex(ValueError, "Unsupported organizer action"):
+            _validate_organize_plan(
+                self.plan([{"action": "delete_layer", "target": "root/G1"}]),
+                self.inspection,
+            )
+
+    def test_visibility_change_requires_separate_explicit_approval_before_photoshop(self):
+        plan = self.plan([
+            {
+                "action": "set_visibility",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "visible": False,
+            }
+        ])
+        bridge = FakeInspectBridge(_make_inspection_response())
+
+        with self.assertRaisesRegex(PermissionError, "approved_visual_changes=True"):
+            apply_organize_plan(
+                self.input_psd,
+                plan,
+                self.root / "visibility_output.psd",
+                approved=True,
+                bridge=bridge,
+            )
+
+        # The critical approval gate runs before Photoshop is inspected or edited.
+        self.assertEqual(bridge.jsx_calls, [])
+
+    def test_plan_rejects_moving_background_locked_or_clipping_layers(self):
+        plan = self.plan([
+            {"action": "move_layer", "target": "root/L3", "expected_name": "Background", "destination": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "background"):
+            _validate_organize_plan(plan, self.inspection)
+
+        clipped = json.loads(json.dumps(self.inspection))
+        layer = next(item for item in clipped["layers"] if item["node_key"] == "root/L2")
+        layer["clipped_to_below"] = True
+        plan = self.plan([
+            {"action": "move_layer", "target": "root/L2", "expected_name": "Micrograph", "destination": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "clipping-mask chains"):
+            _validate_organize_plan(plan, clipped)
+
+    def test_plan_rejects_self_or_descendant_group_moves_and_sibling_mismatch(self):
+        self_move = self.plan([
+            {"action": "move_layer", "target": "root/G1", "expected_name": "Old Group", "destination": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "itself or one of its descendants"):
+            _validate_organize_plan(self_move, self.inspection)
+
+        bad_reorder = self.plan([
+            {
+                "action": "reorder_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "relative_to": "root/L2",
+                "relative_expected_name": "Micrograph",
+                "position": "before",
+            }
+        ])
+        with self.assertRaisesRegex(ValueError, "siblings"):
+            _validate_organize_plan(bad_reorder, self.inspection)
+
+    def test_plan_rejects_combined_group_moves_that_create_a_parent_cycle(self):
+        inspection = json.loads(json.dumps(self.inspection))
+        inspection["layers"].append({
+            "node_key": "root/G3",
+            "parent_key": "root",
+            "stack_index": 4,
+            "depth": 0,
+            "typename": "LayerSet",
+            "name": "Other Group",
+            "kind": "LayerSet",
+            "visible": True,
+            "opacity": 100.0,
+            "blend_mode": "BlendMode.PASS_THROUGH",
+            "is_background": False,
+            "all_locked": False,
+            "position_locked": False,
+            "pixels_locked": False,
+            "clipped_to_below": False,
+            "bounds_px": [0, 0, 10, 10],
+            "text": None,
+            "path": "Legacy Figure/Other Group",
+        })
+        inspection["layer_count"] += 1
+        plan = self.plan([
+            {
+                "action": "move_layer",
+                "target": "root/G1",
+                "expected_name": "Old Group",
+                "destination": "root/G3",
+            },
+            {
+                "action": "move_layer",
+                "target": "root/G3",
+                "expected_name": "Other Group",
+                "destination": "root/G1",
+            },
+        ])
+        with self.assertRaisesRegex(ValueError, "parent cycle"):
+            _validate_organize_plan(plan, inspection)
+
+    def test_create_groups_must_come_before_layer_operations(self):
+        plan = self.plan([
+            {"action": "rename_layer", "target": "root/G1", "expected_name": "Old Group", "new_name": "Renamed"},
+            {"action": "create_group", "key": "new_group", "name": "New Group", "parent": "root"},
+        ])
+        with self.assertRaisesRegex(ValueError, "must appear before"):
+            _validate_organize_plan(plan, self.inspection)
+
+    def test_plan_rejects_moving_a_layer_inside_a_locked_ancestor_group(self):
+        inspection = json.loads(json.dumps(self.inspection))
+        group = next(layer for layer in inspection["layers"] if layer["node_key"] == "root/G1")
+        group["all_locked"] = True
+        plan = self.plan([
+            {"action": "create_group", "key": "new_group", "name": "New", "parent": "root"},
+            {
+                "action": "move_layer",
+                "target": "root/G1/L0",
+                "expected_name": "Caption copy",
+                "destination": "new_group",
+                "position": "end",
+            },
+        ])
+        with self.assertRaisesRegex(ValueError, "child of a locked group"):
+            _validate_organize_plan(plan, inspection)
+
+    def test_group_parent_rejects_position_locked_groups(self):
+        inspection = json.loads(json.dumps(self.inspection))
+        group = next(layer for layer in inspection["layers"] if layer["node_key"] == "root/G1")
+        group["position_locked"] = True
+        plan = self.plan([
+            {"action": "create_group", "key": "new_group", "name": "Nested", "parent": "root/G1"}
+        ])
+        with self.assertRaisesRegex(ValueError, "position-locked LayerSet"):
+            _validate_organize_plan(plan, inspection)
+
+    def test_apply_organize_jsx_handles_background_and_restores_preferences(self):
+        jsx = _build_apply_organize_plan_jsx({
+            "temp_input_path": "C:/Temp/source.psd",
+            "staged_output_path": "C:/Temp/output.psd",
+            "operations": [
+                {"action": "create_group", "key": "g", "name": "Group", "parent": "root"}
+            ],
+            "verify_refs": [],
+        })
+        self.assertIn("bottom.isBackgroundLayer", jsx)
+        self.assertIn("ElementPlacement.PLACEBEFORE", jsx)
+        self.assertIn("moveToEnd(group, parent)", jsx)
+        self.assertIn("app.preferences.rulerUnits = previousRulerUnits", jsx)
+        self.assertIn("app.preferences.typeUnits = previousTypeUnits", jsx)
+        self.assertIn("doc.saveAs(outputFile", jsx)
+        self.assertIn("SaveOptions.DONOTSAVECHANGES", jsx)
+
+
+    def test_organizer_verification_records_are_decoded(self):
+        encoded = _encode_inspection_record([
+            "VERIFY", "source:root/L0", "root/G1/L0", "root/G1", 0,
+            "ArtLayer", "Caption", True,
+        ])
+        verified = _parse_organize_verify_records(encoded)
+        self.assertEqual(verified["source:root/L0"]["name"], "Caption")
+        self.assertEqual(verified["source:root/L0"]["parent_key"], "root/G1")
+
 
 
 class PreflightFigureUnitTests(unittest.TestCase):

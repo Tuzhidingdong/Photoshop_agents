@@ -11,6 +11,7 @@ import argparse
 import importlib.metadata
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -119,7 +120,15 @@ def _parse_protocol(
 class PhotoshopBridge:
     """Thin, synchronous bridge to a running desktop Photoshop instance."""
 
-    def __init__(self, app: Any = None) -> None:
+    def __init__(
+        self,
+        app: Any = None,
+        *,
+        execution_mode: str = "quiet",
+    ) -> None:
+        if execution_mode not in ("quiet", "interactive"):
+            raise ValueError("execution_mode must be 'quiet' or 'interactive'.")
+        self.execution_mode = execution_mode
         self.app = app if app is not None else self._connect_application()
 
     @staticmethod
@@ -161,14 +170,18 @@ class PhotoshopBridge:
                 exception_type="InvalidJSXInput",
             )
 
+        execution_jsx = jsx
+        if self.execution_mode == "interactive":
+            execution_jsx = jsx.replace("DialogModes.NO", "DialogModes.ALL")
+
         try:
-            result = self.app.doJavaScript(jsx)
+            result = self.app.doJavaScript(execution_jsx)
         except Exception as exc:
             raise PhotoshopBridgeError(
                 "execute_jsx",
                 "Photoshop rejected or failed to execute JSX. Original error: " + str(exc),
                 exception_type=type(exc).__name__,
-                jsx_preview=_clean_jsx_preview(jsx),
+                jsx_preview=_clean_jsx_preview(execution_jsx),
             ) from exc
 
         if result is None:
@@ -3724,6 +3737,3284 @@ def preflight_figure(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Stage 8A: inspect an existing PSD without modifying it
+# ---------------------------------------------------------------------------
+
+
+def _build_inspect_psd_jsx(config: Dict[str, Any]) -> str:
+    """Build read-only JSX that enumerates the mixed, ordered Photoshop layer tree."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(
+                values[i] === undefined || values[i] === null ? "" : String(values[i])
+            ));
+        }
+        return encoded.join("|");
+    }
+    function safeProperty(object, propertyName, fallback) {
+        try {
+            var value = object[propertyName];
+            return value === undefined || value === null ? fallback : value;
+        } catch (e) {
+            return fallback;
+        }
+    }
+    function px(value) {
+        try {
+            return value.as("px");
+        } catch (e) {
+            return "";
+        }
+    }
+    function layerBounds(layer) {
+        try {
+            var b = layer.bounds;
+            return [px(b[0]), px(b[1]), px(b[2]), px(b[3])];
+        } catch (e) {
+            return ["", "", "", ""];
+        }
+    }
+    function rgbHex(color) {
+        function hex(value) {
+            var result = Math.round(value).toString(16).toUpperCase();
+            return result.length < 2 ? "0" + result : result;
+        }
+        try {
+            return "#" + hex(color.rgb.red) + hex(color.rgb.green) + hex(color.rgb.blue);
+        } catch (e) {
+            return "";
+        }
+    }
+    function inspectText(layer) {
+        if (String(safeProperty(layer, "kind", "")) !== String(LayerKind.TEXT)) {
+            return ["", "", "", ""];
+        }
+        try {
+            var item = layer.textItem;
+            return [
+                String(item.contents),
+                String(item.font),
+                item.size.as("pt"),
+                rgbHex(item.color)
+            ];
+        } catch (e) {
+            return ["", "", "", ""];
+        }
+    }
+
+    var cfg = __SCI_INSPECT_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousRulerUnits = app.preferences.rulerUnits;
+    var previousTypeUnits = app.preferences.typeUnits;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var rows = [];
+    var layerCount = 0;
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var inputFile = new File(cfg.input_path);
+        if (!inputFile.exists) {
+            throw new Error("Input PSD does not exist: " + cfg.input_path);
+        }
+        doc = app.open(inputFile);
+
+        var width = doc.width.as("px");
+        var height = doc.height.as("px");
+        var dpi = Number(doc.resolution);
+        var mode = doc.mode == DocumentMode.RGB ? "RGB" : String(doc.mode);
+        var profile = "";
+        try {
+            profile = String(doc.colorProfileName);
+        } catch (profileError) {}
+        rows.push(encodeRecord([
+            "DOC", cfg.document_label, width, height, dpi, mode, profile
+        ]));
+
+        function walk(container, parentKey, parentPath, depth) {
+            // Document.layers / LayerSet.layers preserves the interleaved
+            // front-to-back order of ArtLayers and LayerSets.
+            var collection = container.layers;
+            for (var i = 0; i < collection.length; i++) {
+                var layer = collection[i];
+                var isGroup = layer.typename === "LayerSet";
+                var nodeKey = parentKey + "/" + (isGroup ? "G" : "L") + i;
+                var layerPath = parentPath + "/" + layer.name;
+                var bounds = layerBounds(layer);
+                var text = isGroup ? ["", "", "", ""] : inspectText(layer);
+                var kind = isGroup ? "LayerSet" : String(safeProperty(layer, "kind", "unknown"));
+
+                rows.push(encodeRecord([
+                    "LAYER",
+                    nodeKey,
+                    parentKey,
+                    i,
+                    depth,
+                    layer.typename,
+                    layer.name,
+                    kind,
+                    safeProperty(layer, "visible", true),
+                    safeProperty(layer, "opacity", 100),
+                    safeProperty(layer, "blendMode", ""),
+                    safeProperty(layer, "isBackgroundLayer", false),
+                    safeProperty(layer, "allLocked", false),
+                    safeProperty(layer, "positionLocked", false),
+                    safeProperty(layer, "pixelsLocked", false),
+                    safeProperty(layer, "grouped", false),
+                    bounds[0], bounds[1], bounds[2], bounds[3],
+                    text[0], text[1], text[2], text[3],
+                    layerPath
+                ]));
+                layerCount++;
+                if (isGroup) {
+                    walk(layer, nodeKey, layerPath, depth + 1);
+                }
+            }
+        }
+
+        walk(doc, "root", cfg.document_label, 0);
+        rows.unshift(encodeRecord(["COUNT", layerCount]));
+
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+        doc = null;
+        return ["SCI_PS_INSPECT_PSD", "OK", rows.join("\n")].join("\t");
+    } catch (e) {
+        return [
+            "SCI_PS_INSPECT_PSD",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreDocError) {}
+        }
+        try {
+            app.preferences.rulerUnits = previousRulerUnits;
+        } catch (restoreRulerError) {}
+        try {
+            app.preferences.typeUnits = previousTypeUnits;
+        } catch (restoreTypeError) {}
+        app.displayDialogs = previousDialogs;
+    }
+})();
+"""
+    return template.replace("__SCI_INSPECT_CONFIG__", payload)
+
+
+def _parse_psd_inspection_records(encoded_records: str) -> Dict[str, Any]:
+    """Decode a read-only PSD inspection payload into an ordered layer tree."""
+    parsed: Dict[str, Any] = {
+        "document": None,
+        "layers": [],
+        "layer_count": 0,
+    }
+
+    def number(value: str, default: Optional[float] = None) -> Optional[float]:
+        if value == "":
+            return default
+        return float(value)
+
+    def boolean(value: str) -> bool:
+        return str(value).lower() == "true"
+
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if values[0] == "COUNT":
+            if len(values) != 2:
+                raise ValueError("Invalid COUNT inspection record: " + repr(values))
+            parsed["layer_count"] = int(values[1])
+        elif values[0] == "DOC":
+            if len(values) != 7:
+                raise ValueError("Invalid DOC inspection record: " + repr(values))
+            parsed["document"] = {
+                "name": values[1],
+                "width_px": int(float(values[2])),
+                "height_px": int(float(values[3])),
+                "dpi": float(values[4]),
+                "mode": values[5],
+                "color_profile": values[6],
+            }
+        elif values[0] == "LAYER":
+            if len(values) != 25:
+                raise ValueError(
+                    "Invalid LAYER inspection record; expected 25 fields, got "
+                    + str(len(values))
+                )
+            parsed["layers"].append({
+                "node_key": values[1],
+                "parent_key": values[2],
+                "stack_index": int(values[3]),
+                "depth": int(values[4]),
+                "typename": values[5],
+                "name": values[6],
+                "kind": values[7],
+                "visible": boolean(values[8]),
+                "opacity": float(values[9]),
+                "blend_mode": values[10],
+                "is_background": boolean(values[11]),
+                "all_locked": boolean(values[12]),
+                "position_locked": boolean(values[13]),
+                "pixels_locked": boolean(values[14]),
+                "clipped_to_below": boolean(values[15]),
+                "bounds_px": [
+                    number(values[16]), number(values[17]),
+                    number(values[18]), number(values[19]),
+                ],
+                "text": {
+                    "contents": values[20],
+                    "font_postscript": values[21],
+                    "size_pt": number(values[22]),
+                    "color_hex": values[23],
+                } if values[7] == "LayerKind.TEXT" else None,
+                "path": values[24],
+            })
+        else:
+            raise ValueError("Unknown PSD inspection record type: " + values[0])
+
+    if parsed["document"] is None:
+        raise ValueError("Photoshop PSD inspection did not contain a DOC record.")
+    if parsed["layer_count"] != len(parsed["layers"]):
+        raise ValueError(
+            "PSD inspection layer count mismatch: "
+            + str(parsed["layer_count"]) + " vs " + str(len(parsed["layers"]))
+        )
+
+    keys = [layer["node_key"] for layer in parsed["layers"]]
+    if len(keys) != len(set(keys)):
+        raise ValueError("PSD inspection returned duplicate node keys.")
+    known_keys = {"root", *keys}
+    layer_by_key = {layer["node_key"]: layer for layer in parsed["layers"]}
+    siblings: Dict[tuple[str, int], str] = {}
+    for layer in parsed["layers"]:
+        parent_key = layer["parent_key"]
+        node_key = layer["node_key"]
+        if parent_key not in known_keys:
+            raise ValueError(
+                "PSD inspection returned an unknown parent key for " + node_key
+            )
+        if node_key.rsplit("/", 1)[0] != parent_key:
+            raise ValueError("PSD inspection returned an inconsistent node path: " + node_key)
+        if parent_key != "root":
+            parent_layer = layer_by_key[parent_key]
+            if parent_layer["typename"] != "LayerSet":
+                raise ValueError("PSD inspection parent is not a LayerSet: " + node_key)
+            if layer["depth"] != parent_layer["depth"] + 1:
+                raise ValueError("PSD inspection returned an inconsistent depth: " + node_key)
+        elif layer["depth"] != 0:
+            raise ValueError("Top-level PSD layer has a non-zero depth: " + node_key)
+        sibling_key = (parent_key, layer["stack_index"])
+        if sibling_key in siblings:
+            raise ValueError(
+                "PSD inspection returned duplicate sibling indices: "
+                + siblings[sibling_key] + " and " + node_key
+            )
+        siblings[sibling_key] = node_key
+    return parsed
+
+
+def inspect_psd(
+    input_path: str | Path,
+    *,
+    report_path: Optional[str | Path] = None,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Inspect an existing PSD read-only and return its full ordered layer tree."""
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+
+    report_file: Optional[Path] = None
+    if report_path is not None:
+        report_file = Path(report_path).expanduser().resolve()
+        if report_file.suffix.lower() != ".json":
+            raise ValueError("report_path must end in .json.")
+        if report_file.exists():
+            raise FileExistsError(
+                "Inspection report already exists; choose another path: "
+                + str(report_file)
+            )
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+
+    source_hash_before = _sha256_file(source_file)
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    token = uuid.uuid4().hex[:16]
+    temp_input = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / (
+        "sci_insp_" + token + ".psd"
+    )
+    jsx = ""
+    try:
+        # Inspect a byte-identical temporary copy so an already-open, unsaved
+        # Photoshop document cannot silently change the on-disk inspection basis.
+        shutil.copy2(source_file, temp_input)
+        if _sha256_file(temp_input) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "Temporary inspection copy is not byte-identical to the source PSD.",
+                exception_type="WorkingCopyIntegrityError",
+            )
+
+        jsx = _build_inspect_psd_jsx({
+            "input_path": str(temp_input),
+            "document_label": source_file.name,
+        })
+        raw = active_bridge.execute_jsx(jsx)
+        protocol = _parse_protocol(raw, "SCI_PS_INSPECT_PSD", 3, "inspect_psd", jsx)
+        inspected = _parse_psd_inspection_records(protocol[2])
+
+        source_hash_after = _sha256_file(source_file)
+        if source_hash_after != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "The source PSD SHA-256 changed during read-only inspection.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        fingerprint_payload = [
+            {
+                "node_key": layer["node_key"],
+                "parent_key": layer["parent_key"],
+                "typename": layer["typename"],
+                "name": layer["name"],
+                "kind": layer["kind"],
+                "stack_index": layer["stack_index"],
+                "bounds_px": layer["bounds_px"],
+                "visible": layer["visible"],
+            }
+            for layer in inspected["layers"]
+        ]
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        if _sha256_file(source_file) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "inspect_psd",
+                "The source PSD changed before inspection completed.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        report = {
+            "schema_version": 1,
+            "passed": True,
+            "input_psd": str(source_file),
+            "source_sha256": source_hash_before,
+            "layer_tree_sha256": fingerprint,
+            "document": inspected["document"],
+            "layer_count": inspected["layer_count"],
+            "group_count": sum(
+                1 for layer in inspected["layers"]
+                if layer["typename"] == "LayerSet"
+            ),
+            "text_layer_count": sum(
+                1 for layer in inspected["layers"]
+                if layer["kind"] == "LayerKind.TEXT"
+            ),
+            "smart_object_count": sum(
+                1 for layer in inspected["layers"]
+                if layer["kind"] == "LayerKind.SMARTOBJECT"
+            ),
+            "layers": inspected["layers"],
+            "source_sha256_unchanged": True,
+        }
+
+        if report_file is not None:
+            report["report_path"] = str(report_file)
+            temp_report = report_file.with_name(report_file.stem + ".tmp" + report_file.suffix)
+            try:
+                temp_report.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(temp_report, report_file)
+            finally:
+                if temp_report.exists():
+                    temp_report.unlink()
+
+        return report
+    finally:
+        try:
+            if temp_input.exists():
+                temp_input.unlink()
+        except OSError:
+            pass
+
+
+
+# ---------------------------------------------------------------------------
+# Stage 9A: visual layer previews for existing PSDs
+# ---------------------------------------------------------------------------
+
+
+def _build_preview_psd_layers_jsx(config: Dict[str, Any]) -> str:
+    """Build JSX that exports isolated layer/group previews from a temporary PSD copy."""
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(
+                values[i] === undefined || values[i] === null ? "" : String(values[i])
+            ));
+        }
+        return encoded.join("|");
+    }
+    function safeVisible(layer) {
+        try {
+            return Boolean(layer.visible);
+        } catch (e) {
+            return true;
+        }
+    }
+    function walk(container, parentKey, map, containers) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            var isGroup = layer.typename === "LayerSet";
+            var key = parentKey + "/" + (isGroup ? "G" : "L") + i;
+            map[key] = layer;
+            if (isGroup) {
+                containers[key] = layer;
+                walk(layer, key, map, containers);
+            }
+        }
+    }
+    function hideAll(container) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            try {
+                layer.visible = false;
+            } catch (hideError) {}
+            if (layer.typename === "LayerSet") {
+                hideAll(layer);
+            }
+        }
+    }
+    function restoreGroupChildren(sourceGroup, previewGroup) {
+        var sourceLayers = sourceGroup.layers;
+        var previewLayers = previewGroup.layers;
+        if (sourceLayers.length !== previewLayers.length) {
+            throw new Error("Layer group changed while creating its preview.");
+        }
+        for (var i = 0; i < sourceLayers.length; i++) {
+            var sourceLayer = sourceLayers[i];
+            var previewLayer = previewLayers[i];
+            previewLayer.visible = safeVisible(sourceLayer);
+            if (sourceLayer.typename === "LayerSet") {
+                restoreGroupChildren(sourceLayer, previewLayer);
+            }
+        }
+    }
+    function setAncestorsVisible(item, layerMap) {
+        var parentKey = item.node_key.substring(0, item.node_key.lastIndexOf("/"));
+        while (parentKey !== "root") {
+            if (layerMap[parentKey] === undefined) {
+                throw new Error("Missing preview ancestor: " + parentKey);
+            }
+            layerMap[parentKey].visible = true;
+            parentKey = parentKey.substring(0, parentKey.lastIndexOf("/"));
+        }
+    }
+    function safeClose(doc) {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (e) {}
+        }
+    }
+
+    var cfg = __SCI_PREVIEW_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousRulerUnits = app.preferences.rulerUnits;
+    var previousTypeUnits = app.preferences.typeUnits;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var sourceDoc = null;
+    var rows = [];
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var inputFile = new File(cfg.input_path);
+        if (!inputFile.exists) {
+            throw new Error("Temporary preview PSD is missing: " + cfg.input_path);
+        }
+        sourceDoc = app.open(inputFile);
+
+        // Create a full-composite preview from a disposable duplicate so the
+        // contact sheet can be interpreted in the context of the actual figure.
+        var compositeDoc = null;
+        try {
+            compositeDoc = sourceDoc.duplicate("SCI_PSD_COMPOSITE_PREVIEW", false);
+            var compositeWidth = compositeDoc.width.as("px");
+            var compositeHeight = compositeDoc.height.as("px");
+            var compositeTargetWidth = Math.min(
+                cfg.thumbnail_width_px,
+                compositeWidth
+            );
+            var compositeTargetHeight = Math.max(
+                1,
+                Math.round(compositeHeight * compositeTargetWidth / compositeWidth)
+            );
+            if (
+                compositeTargetWidth !== compositeWidth ||
+                compositeTargetHeight !== compositeHeight
+            ) {
+                compositeDoc.resizeImage(
+                    UnitValue(compositeTargetWidth, "px"),
+                    UnitValue(compositeTargetHeight, "px"),
+                    compositeDoc.resolution,
+                    ResampleMethod.BICUBICSHARPER
+                );
+            }
+            compositeDoc.flatten();
+            var compositeFile = new File(cfg.output_dir + "/composite.png");
+            if (compositeFile.exists) {
+                throw new Error("Composite preview already exists.");
+            }
+            var compositeOptions = new PNGSaveOptions();
+            compositeOptions.interlaced = false;
+            compositeDoc.saveAs(
+                compositeFile,
+                compositeOptions,
+                true,
+                Extension.LOWERCASE
+            );
+            if (!compositeFile.exists || compositeFile.length <= 0) {
+                throw new Error("Photoshop did not create the composite preview PNG.");
+            }
+        } finally {
+            safeClose(compositeDoc);
+        }
+
+        var originalMap = {};
+        var originalContainers = {};
+        walk(sourceDoc, "root", originalMap, originalContainers);
+
+        for (var p = 0; p < cfg.items.length; p++) {
+            var item = cfg.items[p];
+            var previewDoc = null;
+            try {
+                if (originalMap[item.node_key] === undefined) {
+                    throw new Error("Layer key not found in temporary PSD: " + item.node_key);
+                }
+                var sourceLayer = originalMap[item.node_key];
+                var previewFile = new File(cfg.output_dir + "/" + item.file_name);
+                if (previewFile.exists) {
+                    throw new Error("Preview output already exists: " + item.file_name);
+                }
+
+                previewDoc = sourceDoc.duplicate(
+                    "SCI_Layer_Preview_" + item.sequence,
+                    false
+                );
+
+                var previewMap = {};
+                var previewContainers = {};
+                walk(previewDoc, "root", previewMap, previewContainers);
+                hideAll(previewDoc);
+
+                var previewLayer = previewMap[item.node_key];
+                if (previewLayer === undefined) {
+                    throw new Error("Layer key not found in duplicate PSD: " + item.node_key);
+                }
+
+                setAncestorsVisible(item, previewMap);
+                if (previewLayer.typename === "LayerSet") {
+                    previewLayer.visible = true;
+                    restoreGroupChildren(sourceLayer, previewLayer);
+                } else {
+                    previewLayer.visible = true;
+                    var isClipped = false;
+                    try {
+                        isClipped = Boolean(sourceLayer.grouped);
+                    } catch (clipError) {}
+                    if (isClipped) {
+                        var parentKey = item.node_key.substring(
+                            0, item.node_key.lastIndexOf("/")
+                        );
+                        var parentContainer = parentKey === "root" ?
+                            previewDoc : previewContainers[parentKey];
+                        var siblings = parentContainer.layers;
+                        var baseIndex = item.stack_index + 1;
+                        if (baseIndex < siblings.length) {
+                            siblings[baseIndex].visible = true;
+                        }
+                    }
+                }
+
+                // Preserve aspect ratio and downsample only the disposable preview copy.
+                var originalWidth = previewDoc.width.as("px");
+                var originalHeight = previewDoc.height.as("px");
+                var targetWidth = Math.min(cfg.thumbnail_width_px, originalWidth);
+                var targetHeight = Math.max(
+                    1,
+                    Math.round(originalHeight * targetWidth / originalWidth)
+                );
+                if (targetWidth !== originalWidth || targetHeight !== originalHeight) {
+                    previewDoc.resizeImage(
+                        UnitValue(targetWidth, "px"),
+                        UnitValue(targetHeight, "px"),
+                        previewDoc.resolution,
+                        ResampleMethod.BICUBICSHARPER
+                    );
+                }
+
+                var pngOptions = new PNGSaveOptions();
+                pngOptions.interlaced = false;
+                previewDoc.saveAs(previewFile, pngOptions, true, Extension.LOWERCASE);
+                if (!previewFile.exists || previewFile.length <= 0) {
+                    throw new Error("Photoshop did not create the preview PNG.");
+                }
+
+                rows.push(encodeRecord([
+                    "PREVIEW",
+                    item.node_key,
+                    item.file_name,
+                    "OK",
+                    targetWidth,
+                    targetHeight,
+                    ""
+                ]));
+            } catch (previewError) {
+                rows.push(encodeRecord([
+                    "PREVIEW",
+                    item.node_key,
+                    item.file_name,
+                    "ERROR",
+                    "",
+                    "",
+                    clean(previewError.message)
+                ]));
+            } finally {
+                safeClose(previewDoc);
+            }
+        }
+
+        sourceDoc.close(SaveOptions.DONOTSAVECHANGES);
+        sourceDoc = null;
+        return [
+            "SCI_PS_PREVIEW_PSD",
+            "OK",
+            String(cfg.items.length),
+            rows.join("\n")
+        ].join("\t");
+    } catch (e) {
+        return [
+            "SCI_PS_PREVIEW_PSD",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        safeClose(sourceDoc);
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreDocError) {}
+        }
+        try {
+            app.preferences.rulerUnits = previousRulerUnits;
+        } catch (restoreRulerError) {}
+        try {
+            app.preferences.typeUnits = previousTypeUnits;
+        } catch (restoreTypeError) {}
+        app.displayDialogs = previousDialogs;
+    }
+})();
+"""
+    return template.replace("__SCI_PREVIEW_CONFIG__", payload)
+
+
+def _parse_psd_preview_records(encoded_records: str) -> list[Dict[str, Any]]:
+    previews: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if len(values) != 7 or values[0] != "PREVIEW":
+            raise ValueError("Invalid PSD preview record: " + repr(values))
+        if values[1] in seen:
+            raise ValueError("Duplicate PSD preview node key: " + values[1])
+        if values[3] not in ("OK", "ERROR"):
+            raise ValueError("Unknown PSD preview status: " + values[3])
+        seen.add(values[1])
+        previews.append({
+            "node_key": values[1],
+            "file_name": values[2],
+            "status": values[3],
+            "width_px": int(float(values[4])) if values[4] else None,
+            "height_px": int(float(values[5])) if values[5] else None,
+            "error": values[6] or None,
+        })
+    return previews
+
+
+def _build_layer_preview_contact_sheet(
+    previews: list[Dict[str, Any]],
+    output_path: Path,
+    *,
+    columns: int = 3,
+) -> Dict[str, Any]:
+    """Build a labeled visual contact sheet from Photoshop-generated layer PNGs."""
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+    card_width = 320
+    card_height = 235
+    image_height = 180
+    rows = max(1, (len(previews) + columns - 1) // columns)
+    sheet = Image.new(
+        "RGB",
+        (columns * card_width, rows * card_height),
+        (238, 240, 243),
+    )
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default()
+    successful = 0
+
+    for index, preview in enumerate(previews):
+        x = (index % columns) * card_width
+        y = (index // columns) * card_height
+        draw.rectangle(
+            (x + 4, y + 4, x + card_width - 4, y + card_height - 4),
+            fill=(255, 255, 255),
+            outline=(190, 195, 202),
+            width=1,
+        )
+
+        if preview["status"] == "OK":
+            preview_file = output_path.parent / preview["file_name"]
+            with Image.open(preview_file) as opened:
+                image = opened.convert("RGBA")
+                image.thumbnail((card_width - 20, image_height - 16))
+                background = Image.new(
+                    "RGBA", (card_width - 20, image_height - 16), (250, 250, 250, 255)
+                )
+                left = (background.width - image.width) // 2
+                top = (background.height - image.height) // 2
+                background.alpha_composite(image, (left, top))
+                sheet.paste(background.convert("RGB"), (x + 10, y + 10))
+            successful += 1
+        else:
+            draw.text(
+                (x + 14, y + 18),
+                "Preview unavailable",
+                fill=(150, 45, 45),
+                font=font,
+            )
+            draw.text(
+                (x + 14, y + 42),
+                str(preview.get("error") or "Unknown error")[:58],
+                fill=(100, 45, 45),
+                font=font,
+            )
+
+        label = str(preview["node_key"])
+        draw.text(
+            (x + 10, y + image_height + 7),
+            label[:48],
+            fill=(20, 25, 32),
+            font=font,
+        )
+        draw.text(
+            (x + 10, y + image_height + 24),
+            str(preview["name"])[:42] + "  [" + str(preview["kind"]) + "]",
+            fill=(70, 75, 82),
+            font=font,
+        )
+
+    sheet.save(output_path, format="PNG", optimize=True)
+    return {
+        "path": str(output_path),
+        "columns": columns,
+        "rows": rows,
+        "card_width_px": card_width,
+        "card_height_px": card_height,
+        "successful_previews": successful,
+        "total_previews": len(previews),
+    }
+
+
+def preview_psd_layers(
+    input_path: str | Path,
+    output_dir: str | Path,
+    *,
+    node_keys: Optional[list[str]] = None,
+    max_previews: int = 80,
+    thumbnail_width_px: int = 512,
+    inspection_report: Optional[Dict[str, Any] | str | Path] = None,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Create isolated previews of PSD layers/groups on disposable copies only."""
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    if not 1 <= int(max_previews) <= 200:
+        raise ValueError("max_previews must be between 1 and 200.")
+    if not 64 <= int(thumbnail_width_px) <= 2048:
+        raise ValueError("thumbnail_width_px must be between 64 and 2048.")
+
+    preview_folder = Path(output_dir).expanduser().resolve()
+    if preview_folder.exists():
+        raise FileExistsError(
+            "Preview output directory already exists; choose a new directory: "
+            + str(preview_folder)
+        )
+    preview_folder.parent.mkdir(parents=True, exist_ok=True)
+    preview_folder.mkdir(parents=False, exist_ok=False)
+    preview_success = False
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+    if inspection_report is None:
+        inspection = inspect_psd(source_file, bridge=active_bridge)
+    else:
+        inspection, _ = _load_json_object(inspection_report, "inspection_report")
+        if inspection.get("schema_version") != 1 or inspection.get("passed") is not True:
+            raise ValueError("inspection_report must be a successful schema_version 1 report.")
+        if inspection.get("source_sha256") != _sha256_file(source_file):
+            raise ValueError("inspection_report does not match the current PSD source hash.")
+        inspected_layers = inspection.get("layers")
+        if (
+            not isinstance(inspected_layers, list)
+            or not inspected_layers
+            or inspection.get("layer_count") != len(inspected_layers)
+            or not isinstance(inspection.get("layer_tree_sha256"), str)
+            or not inspection["layer_tree_sha256"]
+        ):
+            raise ValueError("inspection_report contains an invalid layer inventory or tree fingerprint.")
+    layer_by_key = {layer["node_key"]: layer for layer in inspection["layers"]}
+    all_node_keys = set(layer_by_key)
+    eligible_node_keys = {
+        layer["node_key"] for layer in inspection["layers"]
+        if not layer["is_background"]
+    }
+
+    if node_keys is None:
+        skipped_backgrounds = [
+            layer["node_key"] for layer in inspection["layers"]
+            if layer["is_background"]
+        ]
+        selected_layers = [
+            layer for layer in inspection["layers"]
+            if not layer["is_background"]
+        ]
+    else:
+        if not node_keys:
+            raise ValueError("node_keys cannot be an empty list.")
+        if len(node_keys) != len(set(node_keys)):
+            raise ValueError("node_keys must not contain duplicates.")
+        unknown = [key for key in node_keys if key not in layer_by_key]
+        if unknown:
+            raise ValueError("Unknown PSD node_keys: " + ", ".join(unknown))
+        selected_layers = [layer_by_key[key] for key in node_keys]
+
+    if len(selected_layers) > max_previews:
+        raise ValueError(
+            "PSD has " + str(len(selected_layers)) + " selected layers/groups; "
+            + "max_previews is " + str(max_previews)
+            + ". Select node_keys or raise max_previews."
+        )
+
+    if node_keys is not None:
+        skipped_backgrounds = [
+            layer["node_key"] for layer in selected_layers if layer["is_background"]
+        ]
+    selected_layers = [
+        layer for layer in selected_layers if not layer["is_background"]
+    ]
+    if not selected_layers:
+        raise ValueError("No previewable non-background layers/groups were selected.")
+
+    source_hash_before = _sha256_file(source_file)
+    token = uuid.uuid4().hex[:16]
+    temp_input = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / (
+        "sci_prev_" + token + ".psd"
+    )
+    items = [
+        {
+            "sequence": index + 1,
+            "node_key": layer["node_key"],
+            "stack_index": layer["stack_index"],
+            "file_name": "layer_" + str(index + 1).zfill(3) + ".png",
+        }
+        for index, layer in enumerate(selected_layers)
+    ]
+    jsx = ""
+    try:
+        shutil.copy2(source_file, temp_input)
+        if _sha256_file(temp_input) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Temporary preview copy is not byte-identical to the source PSD.",
+                exception_type="WorkingCopyIntegrityError",
+            )
+
+        jsx = _build_preview_psd_layers_jsx({
+            "input_path": str(temp_input),
+            "output_dir": str(preview_folder),
+            "thumbnail_width_px": int(thumbnail_width_px),
+            "items": items,
+        })
+        raw = active_bridge.execute_jsx(jsx)
+        protocol = _parse_protocol(
+            raw, "SCI_PS_PREVIEW_PSD", 4, "preview_psd_layers", jsx
+        )
+        if int(protocol[2]) != len(items):
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Photoshop preview count does not match the requested layer count.",
+                exception_type="PreviewCountMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        composite_file = preview_folder / "composite.png"
+        if not composite_file.is_file() or composite_file.stat().st_size <= 0:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Photoshop did not create a non-empty composite preview.",
+                exception_type="CompositePreviewExportError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        previews = _parse_psd_preview_records(protocol[3])
+        expected_keys = {item["node_key"] for item in items}
+        if {item["node_key"] for item in previews} != expected_keys:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "Photoshop preview response does not match the requested node keys.",
+                exception_type="PreviewIdentityMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        for preview in previews:
+            layer = layer_by_key[preview["node_key"]]
+            preview["name"] = layer["name"]
+            preview["kind"] = layer["kind"]
+            preview["path"] = layer["path"]
+            if preview["status"] == "OK":
+                preview_file = preview_folder / preview["file_name"]
+                if not preview_file.is_file() or preview_file.stat().st_size <= 0:
+                    preview["status"] = "ERROR"
+                    preview["error"] = "Photoshop reported success but the PNG is missing or empty."
+
+        contact_sheet = _build_layer_preview_contact_sheet(
+            previews,
+            preview_folder / "layer_contact_sheet.png",
+        )
+
+        source_hash_after = _sha256_file(source_file)
+        if source_hash_after != source_hash_before:
+            raise PhotoshopBridgeError(
+                "preview_psd_layers",
+                "The source PSD SHA-256 changed during layer preview generation.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        previewed_keys = {item["node_key"] for item in previews}
+        missing_preview_keys = sorted(eligible_node_keys - previewed_keys)
+        selected_preview_keys = previewed_keys & eligible_node_keys
+        failed_preview_keys = sorted(
+            item["node_key"] for item in previews if item["status"] != "OK"
+        )
+        full_visual_coverage = (
+            selected_preview_keys == eligible_node_keys
+            and not missing_preview_keys
+            and not failed_preview_keys
+        )
+        report = {
+            "schema_version": 1,
+            "passed": any(item["status"] == "OK" for item in previews),
+            "input_psd": str(source_file),
+            "source_sha256": source_hash_before,
+            "layer_tree_sha256": inspection["layer_tree_sha256"],
+            "inspection_layer_count": inspection["layer_count"],
+            "all_node_count": len(all_node_keys),
+            "eligible_non_background_node_count": len(eligible_node_keys),
+            "previewed_non_background_node_count": len(selected_preview_keys),
+            "full_visual_coverage": full_visual_coverage,
+            "missing_preview_node_keys": missing_preview_keys,
+            "failed_preview_node_keys": failed_preview_keys,
+            "preview_dir": str(preview_folder),
+            "composite_preview": str(composite_file),
+            "contact_sheet": contact_sheet,
+            "preview_count": len(previews),
+            "successful_count": sum(1 for item in previews if item["status"] == "OK"),
+            "failed_count": sum(1 for item in previews if item["status"] == "ERROR"),
+            "skipped_backgrounds": skipped_backgrounds,
+            "previews": previews,
+            "source_sha256_unchanged": source_hash_after == source_hash_before,
+        }
+        report_path = preview_folder / "preview_report.json"
+        report["report_path"] = str(report_path)
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        preview_success = True
+        return report
+    finally:
+        try:
+            if temp_input.exists():
+                temp_input.unlink()
+        except OSError:
+            pass
+        if not preview_success:
+            try:
+                if preview_folder.exists():
+                    shutil.rmtree(preview_folder)
+            except OSError:
+                pass
+
+
+
+def prepare_existing_psd(
+    input_path: str | Path,
+    workflow_dir: str | Path,
+    *,
+    max_previews: int = 200,
+    thumbnail_width_px: int = 512,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Create one reusable inspection and full visual index; include optional classification scaffolding."""
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    if not 1 <= int(max_previews) <= 200:
+        raise ValueError("max_previews must be between 1 and 200.")
+    if not 64 <= int(thumbnail_width_px) <= 2048:
+        raise ValueError("thumbnail_width_px must be between 64 and 2048.")
+
+    workspace = Path(workflow_dir).expanduser().resolve()
+    if workspace.exists():
+        raise FileExistsError(
+            "Existing-PSD workflow directory already exists; choose a new directory: "
+            + str(workspace)
+        )
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=False, exist_ok=False)
+
+    inspection_path = workspace / "inspection_report.json"
+    preview_dir = workspace / "visual_previews"
+    template_path = workspace / "classification_work_template.json"
+    manifest_path = workspace / "workflow_manifest.json"
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+
+    # Inspect once and reuse the exact ordered inventory for all downstream preparation.
+    inspection = inspect_psd(
+        source_file,
+        report_path=inspection_path,
+        bridge=active_bridge,
+    )
+    preview = preview_psd_layers(
+        source_file,
+        preview_dir,
+        max_previews=max_previews,
+        thumbnail_width_px=thumbnail_width_px,
+        inspection_report=inspection,
+        bridge=active_bridge,
+    )
+    if preview.get("full_visual_coverage") is not True:
+        raise ValueError(
+            "Full visual coverage was not achieved. Review the preserved preview report before classification: "
+            + str(preview.get("report_path"))
+        )
+
+    template = create_psd_classification_template(
+        source_file,
+        inspection_path,
+        template_path,
+        preview_report=preview["report_path"],
+    )
+    source_hash_after = _sha256_file(source_file)
+    if source_hash_after != inspection["source_sha256"]:
+        raise PhotoshopBridgeError(
+            "prepare_existing_psd",
+            "The source PSD SHA-256 changed during existing-PSD preparation.",
+            exception_type="SourceIntegrityError",
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "passed": True,
+        "workflow": "prepare_existing_psd",
+        "input_psd": str(source_file),
+        "source_sha256": inspection["source_sha256"],
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "layer_count": inspection["layer_count"],
+        "group_count": inspection["group_count"],
+        "text_layer_count": inspection["text_layer_count"],
+        "smart_object_count": inspection["smart_object_count"],
+        "full_visual_coverage": preview["full_visual_coverage"],
+        "preview_success_count": preview["successful_count"],
+        "preview_failure_count": preview["failed_count"],
+        "artifacts": {
+            "inspection_report": str(inspection_path),
+            "composite_preview": preview["composite_preview"],
+            "layer_contact_sheet": preview["contact_sheet"]["path"],
+            "preview_report": preview["report_path"],
+            "classification_work_template": str(template_path),
+        },
+        "requires_agent_visual_review": True,
+        "requires_user_approval_for_organization": True,
+        "organizer_operations_created": False,
+    }
+    temp_manifest = manifest_path.with_name(manifest_path.stem + ".tmp" + manifest_path.suffix)
+    try:
+        temp_manifest.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_manifest, manifest_path)
+    finally:
+        if temp_manifest.exists():
+            temp_manifest.unlink()
+
+    return {
+        **manifest,
+        "workflow_manifest": str(manifest_path),
+        "classification_template_sha256": template["template_sha256"],
+        "agent_workflow": "single_pass_semantic_review",
+        "classification_template_required": False,
+        "next_step": (
+            "Review the composite, layer metadata, and isolated previews in one semantic pass. "
+            "Write one complete evidence-grounded classification JSON directly; "
+            "classification_work_template.json is optional scaffolding for unusually complex cases. "
+            "Then prepare one consolidated risk-assessed organizer-plan draft. Do not apply it "
+            "until the user approves the exact operations."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stage 8B: approved, non-destructive existing-PSD organization plans
+# ---------------------------------------------------------------------------
+
+
+def _load_organize_plan(plan: Dict[str, Any] | str | Path) -> Dict[str, Any]:
+    if isinstance(plan, (str, Path)):
+        plan_path = Path(plan).expanduser().resolve(strict=True)
+        if not plan_path.is_file() or plan_path.suffix.lower() != ".json":
+            raise ValueError("plan_path must be an existing JSON file.")
+        loaded = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+    elif isinstance(plan, dict):
+        loaded = json.loads(json.dumps(plan, ensure_ascii=False))
+    else:
+        raise ValueError("plan must be a dictionary or a JSON file path.")
+    if not isinstance(loaded, dict):
+        raise ValueError("Organizer plan must be a JSON object.")
+    return loaded
+
+
+def _valid_layer_name(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(field + " must be a string.")
+    name = value.strip()
+    if not name or len(name) > 255 or any(ord(char) < 32 for char in name):
+        raise ValueError(field + " must be 1–255 printable characters.")
+    return name
+
+
+def _validate_organize_plan(
+    plan: Dict[str, Any],
+    inspection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate source identity, exact layer references, and safe structure-only operations."""
+    if plan.get("schema_version") != 1:
+        raise ValueError("Unsupported organizer plan schema_version; expected 1.")
+    if plan.get("source_sha256") != inspection.get("source_sha256"):
+        raise ValueError("Organizer plan source_sha256 does not match the current PSD.")
+    if plan.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+        raise ValueError("Organizer plan layer_tree_sha256 does not match the current PSD.")
+
+    source_layers = {
+        layer["node_key"]: layer for layer in inspection.get("layers", [])
+    }
+
+    def has_locked_ancestor(key: str) -> bool:
+        current = source_layers[key]["parent_key"]
+        while current != "root":
+            parent_layer = source_layers[current]
+            if parent_layer["all_locked"] or parent_layer["position_locked"]:
+                return True
+            current = parent_layer["parent_key"]
+        return False
+
+    def participates_in_clipping_chain(key: str) -> bool:
+        layer = source_layers[key]
+        if layer["clipped_to_below"]:
+            return True
+        siblings = sorted(
+            (
+                item for item in source_layers.values()
+                if item["parent_key"] == layer["parent_key"]
+            ),
+            key=lambda item: item["stack_index"],
+        )
+        position = next(
+            index for index, item in enumerate(siblings)
+            if item["node_key"] == key
+        )
+        # In Photoshop's front-to-back layer order, clipped layers sit above
+        # the base layer they clip to. Moving/reordering that base can detach
+        # the clipping relationship just as moving a clipped layer can.
+        index = position - 1
+        while index >= 0 and siblings[index]["clipped_to_below"]:
+            return True
+        return False
+    operations = plan.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("Organizer plan must contain a non-empty operations array.")
+
+    existing_keys = set(source_layers)
+    group_parents: Dict[str, str] = {}
+    normalized: list[Dict[str, Any]] = []
+    source_ref_keys: set[str] = set()
+    renamed: set[str] = set()
+    moved: set[str] = set()
+    reordered: set[str] = set()
+    visibility_set: set[str] = set()
+    non_create_started = False
+
+    def require_layer(key: Any, field: str) -> Dict[str, Any]:
+        if not isinstance(key, str) or key not in source_layers:
+            raise ValueError(field + " must reference an inspected source node_key.")
+        source_ref_keys.add(key)
+        return source_layers[key]
+
+    def require_group_parent(key: Any, field: str) -> str:
+        if key == "root":
+            return "root"
+        if key in group_parents:
+            return key
+        layer = require_layer(key, field)
+        if layer["typename"] != "LayerSet":
+            raise ValueError(field + " must reference root, a LayerSet, or an earlier created group.")
+        if layer["all_locked"] or layer["position_locked"] or has_locked_ancestor(key):
+            raise ValueError(field + " cannot target a fully or position-locked LayerSet or ancestor.")
+        return key
+
+    def destination_is_inside_target(destination: str, target_key: str) -> bool:
+        current = destination
+        while current != "root":
+            if current == target_key:
+                return True
+            if current in group_parents:
+                current = group_parents[current]
+            else:
+                parent_layer = source_layers.get(current)
+                if parent_layer is None:
+                    return False
+                current = parent_layer["parent_key"]
+        return False
+
+    for index, raw_operation in enumerate(operations):
+        if not isinstance(raw_operation, dict):
+            raise ValueError("Organizer operation " + str(index) + " must be an object.")
+        operation = dict(raw_operation)
+        action = operation.get("action")
+
+        if action == "create_group":
+            if non_create_started:
+                raise ValueError("create_group operations must appear before layer operations.")
+            key = operation.get("key")
+            if (
+                not isinstance(key, str)
+                or not key
+                or not key[0].isalpha()
+                or not key.replace("_", "").replace("-", "").isalnum()
+                or len(key) > 64
+                or key in group_parents
+                or key in existing_keys
+            ):
+                raise ValueError("create_group key must be unique and use letters, numbers, '_' or '-'.")
+            parent = require_group_parent(operation.get("parent", "root"), "create_group.parent")
+            name = _valid_layer_name(operation.get("name"), "create_group.name")
+            group_parents[key] = parent
+            operation["parent"] = parent
+            operation["name"] = name
+
+        else:
+            non_create_started = True
+            if action == "rename_layer":
+                target = operation.get("target")
+                layer = require_layer(target, "rename_layer.target")
+                if target in renamed:
+                    raise ValueError("A layer may be renamed only once in one plan: " + target)
+                if layer["is_background"]:
+                    raise ValueError("Background layers cannot be renamed by organizer v1: " + target)
+                expected_name = operation.get("expected_name")
+                if expected_name != layer["name"]:
+                    raise ValueError("rename_layer.expected_name no longer matches " + target)
+                operation["new_name"] = _valid_layer_name(
+                    operation.get("new_name"), "rename_layer.new_name"
+                )
+                renamed.add(target)
+
+            elif action == "move_layer":
+                target = operation.get("target")
+                layer = require_layer(target, "move_layer.target")
+                if target in moved or target in reordered:
+                    raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
+                if (
+                    layer["is_background"] or layer["all_locked"]
+                    or layer["position_locked"] or has_locked_ancestor(target)
+                ):
+                    raise ValueError("Locked/background layer or a child of a locked group cannot be moved: " + target)
+                if participates_in_clipping_chain(target):
+                    raise ValueError("Layers participating in clipping-mask chains cannot be moved in organizer v1: " + target)
+                if operation.get("expected_name") != layer["name"]:
+                    raise ValueError("move_layer.expected_name no longer matches " + target)
+                destination = operation.get("destination")
+                if destination == "root":
+                    destination = "root"
+                elif destination in group_parents:
+                    destination = destination
+                else:
+                    destination_layer = require_layer(destination, "move_layer.destination")
+                    if destination_layer["typename"] != "LayerSet":
+                        raise ValueError("move_layer.destination must be root, a LayerSet, or a created group.")
+                    if destination_layer["all_locked"] or destination_layer["position_locked"]:
+                        raise ValueError("move_layer.destination cannot be a fully or position-locked LayerSet.")
+                if layer["typename"] == "LayerSet" and destination_is_inside_target(
+                    destination, target
+                ):
+                    raise ValueError("Cannot move a LayerSet into itself or one of its descendants.")
+                if operation.get("position", "end") not in ("start", "end"):
+                    raise ValueError("move_layer.position must be 'start' or 'end'.")
+                operation["destination"] = destination
+                operation["position"] = operation.get("position", "end")
+                moved.add(target)
+
+            elif action == "reorder_layer":
+                target = operation.get("target")
+                layer = require_layer(target, "reorder_layer.target")
+                relative = operation.get("relative_to")
+                relative_layer = require_layer(relative, "reorder_layer.relative_to")
+                if target == relative:
+                    raise ValueError("reorder_layer.target and relative_to must differ.")
+                if target in moved or target in reordered:
+                    raise ValueError("A layer may be moved/reordered only once in one plan: " + target)
+                if (
+                    layer["is_background"] or layer["all_locked"]
+                    or layer["position_locked"] or has_locked_ancestor(target)
+                ):
+                    raise ValueError("Locked/background layer or a child of a locked group cannot be reordered: " + target)
+                if participates_in_clipping_chain(target):
+                    raise ValueError("Layers participating in clipping-mask chains cannot be reordered in organizer v1: " + target)
+                if operation.get("expected_name") != layer["name"]:
+                    raise ValueError("reorder_layer.expected_name no longer matches " + target)
+                if operation.get("relative_expected_name") != relative_layer["name"]:
+                    raise ValueError("reorder_layer.relative_expected_name no longer matches " + relative)
+                if participates_in_clipping_chain(relative):
+                    raise ValueError("reorder_layer cannot use a layer participating in a clipping-mask chain as its reference.")
+                if layer["parent_key"] != relative_layer["parent_key"]:
+                    raise ValueError("reorder_layer references must be siblings.")
+                if operation.get("position") not in ("before", "after"):
+                    raise ValueError("reorder_layer.position must be 'before' or 'after'.")
+                if relative_layer["is_background"] and operation["position"] == "after":
+                    raise ValueError("A layer cannot be reordered below the locked Background layer.")
+                reordered.add(target)
+
+            elif action == "set_visibility":
+                target = operation.get("target")
+                layer = require_layer(target, "set_visibility.target")
+                if target in visibility_set:
+                    raise ValueError("Visibility may be changed only once per layer: " + target)
+                if operation.get("expected_name") != layer["name"]:
+                    raise ValueError("set_visibility.expected_name no longer matches " + target)
+                if layer["is_background"]:
+                    raise ValueError("Background-layer visibility cannot be changed by organizer v1.")
+                if not isinstance(operation.get("visible"), bool):
+                    raise ValueError("set_visibility.visible must be a boolean.")
+                visibility_set.add(target)
+
+            else:
+                raise ValueError(
+                    "Unsupported organizer action at index " + str(index) + ": " + str(action)
+                )
+
+        normalized.append(operation)
+
+    # Group-to-group moves are checked as one final parent graph, not only
+    # one operation at a time, so two individually plausible moves cannot
+    # create a cycle when combined.
+    planned_group_parents = {
+        key: layer["parent_key"]
+        for key, layer in source_layers.items()
+        if layer["typename"] == "LayerSet"
+    }
+    planned_group_parents.update(group_parents)
+    for operation in normalized:
+        if operation["action"] == "move_layer":
+            target_key = operation["target"]
+            if source_layers[target_key]["typename"] == "LayerSet":
+                planned_group_parents[target_key] = operation["destination"]
+
+    for group_key in planned_group_parents:
+        visited: set[str] = set()
+        current = group_key
+        while current != "root":
+            if current in visited:
+                raise ValueError("Organizer plan would create a LayerSet parent cycle at " + current)
+            visited.add(current)
+            current = planned_group_parents.get(current)
+            if current is None:
+                raise ValueError("Organizer plan references an invalid LayerSet parent.")
+
+    # Reordering cannot use a reference layer that will be moved/reordered,
+    # and a target cannot be moved then reordered in separate plan sections.
+    for operation in normalized:
+        if operation["action"] == "reorder_layer":
+            if operation["target"] in moved:
+                raise ValueError("reorder_layer target cannot also be moved.")
+            if operation["relative_to"] in moved or operation["relative_to"] in reordered:
+                raise ValueError("reorder_layer relative_to cannot itself be moved/reordered.")
+
+    verify_refs: Dict[str, Dict[str, str]] = {}
+
+    def add_source_ref(key: str) -> None:
+        verify_refs["source:" + key] = {"identity": "source:" + key, "source_key": key}
+
+    def add_group_ref(key: str) -> None:
+        verify_refs["group:" + key] = {"identity": "group:" + key, "group_key": key}
+
+    for key in source_ref_keys:
+        add_source_ref(key)
+    for key in group_parents:
+        add_group_ref(key)
+
+    for operation in normalized:
+        action = operation["action"]
+        if action == "create_group":
+            parent = operation["parent"]
+            if parent in group_parents:
+                add_group_ref(parent)
+            elif parent != "root":
+                add_source_ref(parent)
+        elif action == "move_layer":
+            destination = operation["destination"]
+            if destination in group_parents:
+                add_group_ref(destination)
+            elif destination != "root":
+                add_source_ref(destination)
+        elif action == "reorder_layer":
+            add_source_ref(operation["relative_to"])
+
+    return {
+        "operations": normalized,
+        "verify_refs": list(verify_refs.values()),
+        "created_groups": {
+            operation["key"]: operation
+            for operation in normalized
+            if operation["action"] == "create_group"
+        },
+    }
+
+
+def _build_apply_organize_plan_jsx(config: Dict[str, Any]) -> str:
+    payload = json.dumps(config, ensure_ascii=True, separators=(",", ":"))
+    template = r"""
+(function () {
+    function clean(value) {
+        return String(value).replace(/[\r\n\t]/g, " ");
+    }
+    function encodeRecord(values) {
+        var encoded = [];
+        for (var i = 0; i < values.length; i++) {
+            encoded.push(encodeURIComponent(
+                values[i] === undefined || values[i] === null ? "" : String(values[i])
+            ));
+        }
+        return encoded.join("|");
+    }
+    function walk(container, parentKey, map, count) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            var isGroup = layer.typename === "LayerSet";
+            var key = parentKey + "/" + (isGroup ? "G" : "L") + i;
+            map[key] = layer;
+            count.value++;
+            if (isGroup) {
+                walk(layer, key, map, count);
+            }
+        }
+    }
+    function resolveContainer(key, doc, sourceLayers, newGroups) {
+        if (key === "root") {
+            return doc;
+        }
+        if (newGroups[key] !== undefined) {
+            return newGroups[key];
+        }
+        if (sourceLayers[key] !== undefined &&
+            sourceLayers[key].typename === "LayerSet") {
+            return sourceLayers[key];
+        }
+        throw new Error("Destination group could not be resolved: " + key);
+    }
+    function moveToEnd(layer, container) {
+        // Photoshop's locked Background layer must remain at the bottom.
+        // Place a new final sibling immediately above it instead of trying
+        // to move a layer below the Background.
+        if (container.typename === "Document") {
+            var layers = container.layers;
+            if (layers.length > 0) {
+                var bottom = layers[layers.length - 1];
+                try {
+                    if (bottom.isBackgroundLayer) {
+                        layer.move(bottom, ElementPlacement.PLACEBEFORE);
+                        return;
+                    }
+                } catch (backgroundError) {}
+            }
+        }
+        layer.move(container, ElementPlacement.PLACEATEND);
+    }
+    function findNodeInfo(target, container, parentKey) {
+        var collection = container.layers;
+        for (var i = 0; i < collection.length; i++) {
+            var layer = collection[i];
+            var isGroup = layer.typename === "LayerSet";
+            var key = parentKey + "/" + (isGroup ? "G" : "L") + i;
+            if (layer === target) {
+                return {
+                    node_key: key,
+                    parent_key: parentKey,
+                    stack_index: i,
+                    typename: layer.typename,
+                    name: layer.name,
+                    visible: layer.visible
+                };
+            }
+            if (isGroup) {
+                var nested = findNodeInfo(target, layer, key);
+                if (nested !== null) {
+                    return nested;
+                }
+            }
+        }
+        return null;
+    }
+
+    var cfg = __SCI_ORGANIZE_CONFIG__;
+    var previousDialogs = app.displayDialogs;
+    var previousRulerUnits = app.preferences.rulerUnits;
+    var previousTypeUnits = app.preferences.typeUnits;
+    var previousDoc = app.documents.length > 0 ? app.activeDocument : null;
+    var doc = null;
+    var sourceLayers = {};
+    var newGroups = {};
+    var count = {value: 0};
+    var response = "";
+
+    try {
+        app.displayDialogs = DialogModes.NO;
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.preferences.typeUnits = TypeUnits.POINTS;
+
+        var inputFile = new File(cfg.temp_input_path);
+        if (!inputFile.exists) {
+            throw new Error("Temporary source PSD copy is missing.");
+        }
+        doc = app.open(inputFile);
+        walk(doc, "root", sourceLayers, count);
+
+        // Create all requested groups before resolving moves.
+        for (var i = 0; i < cfg.operations.length; i++) {
+            var create = cfg.operations[i];
+            if (create.action !== "create_group") {
+                continue;
+            }
+            var parent = resolveContainer(create.parent, doc, sourceLayers, newGroups);
+            var group = parent.layerSets.add();
+            group.name = create.name;
+            moveToEnd(group, parent);
+            newGroups[create.key] = group;
+        }
+
+        // Rename before moving so labels and paths remain recognizable in reports.
+        for (var r = 0; r < cfg.operations.length; r++) {
+            var rename = cfg.operations[r];
+            if (rename.action === "rename_layer") {
+                sourceLayers[rename.target].name = rename.new_name;
+            }
+        }
+
+        for (var m = 0; m < cfg.operations.length; m++) {
+            var move = cfg.operations[m];
+            if (move.action !== "move_layer") {
+                continue;
+            }
+            var target = sourceLayers[move.target];
+            var destination = resolveContainer(
+                move.destination, doc, sourceLayers, newGroups
+            );
+            if (move.position === "start") {
+                target.move(destination, ElementPlacement.PLACEATBEGINNING);
+            } else {
+                moveToEnd(target, destination);
+            }
+        }
+
+        for (var o = 0; o < cfg.operations.length; o++) {
+            var reorder = cfg.operations[o];
+            if (reorder.action !== "reorder_layer") {
+                continue;
+            }
+            sourceLayers[reorder.target].move(
+                sourceLayers[reorder.relative_to],
+                reorder.position === "before" ?
+                    ElementPlacement.PLACEBEFORE :
+                    ElementPlacement.PLACEAFTER
+            );
+        }
+
+        for (var v = 0; v < cfg.operations.length; v++) {
+            var visibility = cfg.operations[v];
+            if (visibility.action === "set_visibility") {
+                sourceLayers[visibility.target].visible = visibility.visible;
+            }
+        }
+
+        var outputFile = new File(cfg.staged_output_path);
+        if (outputFile.exists) {
+            throw new Error("Staged organizer output already exists.");
+        }
+        var saveOptions = new PhotoshopSaveOptions();
+        saveOptions.embedColorProfile = true;
+        saveOptions.maximizeCompatibility = true;
+        doc.saveAs(outputFile, saveOptions, true, Extension.LOWERCASE);
+
+        if (!outputFile.exists || outputFile.length <= 0) {
+            throw new Error("Photoshop did not create the staged organizer PSD.");
+        }
+
+        var verificationRows = [];
+        for (var q = 0; q < cfg.verify_refs.length; q++) {
+            var ref = cfg.verify_refs[q];
+            var targetRef = ref.source_key !== undefined ?
+                sourceLayers[ref.source_key] : newGroups[ref.group_key];
+            if (targetRef === undefined) {
+                throw new Error("Could not resolve verification reference: " + ref.identity);
+            }
+            var info = findNodeInfo(targetRef, doc, "root");
+            if (info === null) {
+                throw new Error("Could not locate a modified layer after organization: " + ref.identity);
+            }
+            verificationRows.push(encodeRecord([
+                "VERIFY",
+                ref.identity,
+                info.node_key,
+                info.parent_key,
+                info.stack_index,
+                info.typename,
+                info.name,
+                info.visible
+            ]));
+        }
+
+        response = [
+            "SCI_PS_ORGANIZE_PSD",
+            "OK",
+            outputFile.fsName,
+            String(cfg.operations.length),
+            String(count.value),
+            verificationRows.join("\n")
+        ].join("\t");
+
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+        doc = null;
+    } catch (e) {
+        response = [
+            "SCI_PS_ORGANIZE_PSD",
+            "ERROR",
+            clean(e.name),
+            clean(e.message),
+            clean((e.line === undefined) ? "" : e.line)
+        ].join("\t");
+    } finally {
+        if (doc !== null) {
+            try {
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+            } catch (closeError) {}
+        }
+        if (previousDoc !== null) {
+            try {
+                app.activeDocument = previousDoc;
+            } catch (restoreDocError) {}
+        }
+        try {
+            app.preferences.rulerUnits = previousRulerUnits;
+        } catch (restoreRulerError) {}
+        try {
+            app.preferences.typeUnits = previousTypeUnits;
+        } catch (restoreTypeError) {}
+        app.displayDialogs = previousDialogs;
+    }
+    return response;
+})();
+"""
+    return template.replace("__SCI_ORGANIZE_CONFIG__", payload)
+
+
+def _parse_organize_verify_records(encoded_records: str) -> Dict[str, Dict[str, Any]]:
+    verified: Dict[str, Dict[str, Any]] = {}
+    for raw_line in encoded_records.split("\n"):
+        if not raw_line:
+            continue
+        values = [unquote(value) for value in raw_line.split("|")]
+        if len(values) != 8 or values[0] != "VERIFY":
+            raise ValueError("Invalid organizer verification record: " + repr(values))
+        identity = values[1]
+        if identity in verified:
+            raise ValueError("Duplicate organizer verification identity: " + identity)
+        verified[identity] = {
+            "node_key": values[2],
+            "parent_key": values[3],
+            "stack_index": int(values[4]),
+            "typename": values[5],
+            "name": values[6],
+            "visible": values[7].lower() == "true",
+        }
+    return verified
+
+
+def apply_organize_plan(
+    input_path: str | Path,
+    plan: Dict[str, Any] | str | Path,
+    output_path: str | Path,
+    *,
+    approved: bool = False,
+    approved_visual_changes: bool = False,
+    overwrite: bool = False,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Apply an explicitly approved organizer plan to a temporary copy of a PSD."""
+    if not approved:
+        raise PermissionError(
+            "Organizer plan has not been approved. Review it with the user and pass approved=True."
+        )
+
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".psd":
+        raise ValueError("output_path must end in .psd.")
+    if str(source_file).casefold() == str(output_file).casefold():
+        raise ValueError("output_path must differ from input_path; the source PSD is never modified.")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if output_file.exists() and not overwrite:
+        raise FileExistsError(
+            "Output PSD already exists; pass overwrite=True to replace it: "
+            + str(output_file)
+        )
+
+    loaded_plan = _load_organize_plan(plan)
+    planned_operations = loaded_plan.get("operations", [])
+    has_visibility_changes = (
+        isinstance(planned_operations, list)
+        and any(
+            isinstance(operation, dict)
+            and operation.get("action") == "set_visibility"
+            for operation in planned_operations
+        )
+    )
+    if has_visibility_changes and not approved_visual_changes:
+        raise PermissionError(
+            "Organizer plan contains visibility changes that directly alter the rendered figure. "
+            "Call them out explicitly, obtain the user's separate acknowledgement, and pass "
+            "approved_visual_changes=True (CLI: --confirm-visibility-changes)."
+        )
+
+    source_hash_before = _sha256_file(source_file)
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+
+    # Inspect immediately before application to reject stale or mismatched plans.
+    before = inspect_psd(source_file, bridge=active_bridge)
+    normalized = _validate_organize_plan(loaded_plan, before)
+
+    token = uuid.uuid4().hex[:16]
+    temp_input = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / (
+        "sci_org_" + token + ".psd"
+    )
+    staged_output = output_file.parent / (".sci_org_" + token + ".psd")
+    try:
+        shutil.copy2(source_file, temp_input)
+        if _sha256_file(temp_input) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Temporary working copy is not byte-identical to the source PSD.",
+                exception_type="WorkingCopyIntegrityError",
+            )
+
+        config = {
+            "temp_input_path": str(temp_input),
+            "staged_output_path": str(staged_output),
+            "operations": normalized["operations"],
+            "verify_refs": normalized["verify_refs"],
+        }
+        jsx = _build_apply_organize_plan_jsx(config)
+        raw = active_bridge.execute_jsx(jsx)
+        protocol = _parse_protocol(raw, "SCI_PS_ORGANIZE_PSD", 6, "apply_organize_plan", jsx)
+
+        if not staged_output.is_file() or staged_output.stat().st_size <= 0:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Photoshop reported success but the staged PSD is missing or empty.",
+                exception_type="PsdSaveVerificationError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        verified_refs = _parse_organize_verify_records(protocol[5])
+        expected_identities = {
+            item["identity"] for item in normalized["verify_refs"]
+        }
+        if set(verified_refs) != expected_identities:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Photoshop verification references do not match the approved plan.",
+                exception_type="OrganizerVerificationMismatch",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        after = inspect_psd(staged_output, bridge=active_bridge)
+        expected_layer_count = before["layer_count"] + len(normalized["created_groups"])
+        expected_group_count = before["group_count"] + len(normalized["created_groups"])
+        if (
+            after["layer_count"] != expected_layer_count
+            or after["group_count"] != expected_group_count
+            or after["text_layer_count"] != before["text_layer_count"]
+            or after["smart_object_count"] != before["smart_object_count"]
+        ):
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "The reopened PSD changed layer/content-category counts beyond the approved group creation: "
+                + repr({
+                    "layers_before": before["layer_count"],
+                    "layers_after": after["layer_count"],
+                    "layers_expected": expected_layer_count,
+                    "groups_before": before["group_count"],
+                    "groups_after": after["group_count"],
+                    "groups_expected": expected_group_count,
+                    "text_before": before["text_layer_count"],
+                    "text_after": after["text_layer_count"],
+                    "smart_objects_before": before["smart_object_count"],
+                    "smart_objects_after": after["smart_object_count"],
+                }),
+                exception_type="OrganizerContentCountMismatch",
+            )
+        after_by_key = {layer["node_key"]: layer for layer in after["layers"]}
+
+        for identity, observed in verified_refs.items():
+            reopened = after_by_key.get(observed["node_key"])
+            if reopened is None:
+                raise PhotoshopBridgeError(
+                    "apply_organize_plan",
+                    "Reopened PSD is missing an expected organized layer: " + identity,
+                    exception_type="OrganizerReopenVerificationError",
+                )
+            if (
+                reopened["parent_key"] != observed["parent_key"]
+                or reopened["stack_index"] != observed["stack_index"]
+                or reopened["typename"] != observed["typename"]
+                or reopened["name"] != observed["name"]
+                or reopened["visible"] != observed["visible"]
+            ):
+                raise PhotoshopBridgeError(
+                    "apply_organize_plan",
+                    "Reopened PSD layer state differs from Photoshop's organization result: "
+                    + identity,
+                    exception_type="OrganizerReopenVerificationError",
+                )
+
+        for operation in normalized["operations"]:
+            action = operation["action"]
+            if action == "create_group":
+                observed = verified_refs["group:" + operation["key"]]
+                if observed["typename"] != "LayerSet" or observed["name"] != operation["name"]:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Created group failed verification: " + operation["key"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+                parent_identity = (
+                    "group:" + operation["parent"]
+                    if operation["parent"] in normalized["created_groups"]
+                    else "source:" + operation["parent"]
+                    if operation["parent"] != "root"
+                    else None
+                )
+                expected_parent = (
+                    verified_refs[parent_identity]["node_key"]
+                    if parent_identity is not None else "root"
+                )
+                if observed["parent_key"] != expected_parent:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Created group was placed under the wrong parent: " + operation["key"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "rename_layer":
+                observed = verified_refs["source:" + operation["target"]]
+                if observed["name"] != operation["new_name"]:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Renamed layer failed verification: " + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "move_layer":
+                observed = verified_refs["source:" + operation["target"]]
+                destination = operation["destination"]
+                if destination == "root":
+                    expected_parent = "root"
+                elif destination in normalized["created_groups"]:
+                    expected_parent = verified_refs["group:" + destination]["node_key"]
+                else:
+                    expected_parent = verified_refs["source:" + destination]["node_key"]
+                if observed["parent_key"] != expected_parent:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Moved layer has an unexpected parent: " + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "reorder_layer":
+                observed = verified_refs["source:" + operation["target"]]
+                relative = verified_refs["source:" + operation["relative_to"]]
+                correct = (
+                    observed["parent_key"] == relative["parent_key"]
+                    and (
+                        observed["stack_index"] < relative["stack_index"]
+                        if operation["position"] == "before"
+                        else observed["stack_index"] > relative["stack_index"]
+                    )
+                )
+                if not correct:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Reordered layer is not on the requested side of its reference: "
+                        + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+            elif action == "set_visibility":
+                observed = verified_refs["source:" + operation["target"]]
+                if observed["visible"] is not operation["visible"]:
+                    raise PhotoshopBridgeError(
+                        "apply_organize_plan",
+                        "Layer visibility failed verification: " + operation["target"],
+                        exception_type="OrganizerOperationVerificationError",
+                    )
+
+        if _sha256_file(source_file) != source_hash_before:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "The source PSD SHA-256 changed during organization.",
+                exception_type="SourceIntegrityError",
+                jsx_preview=_clean_jsx_preview(jsx),
+            )
+
+        staged_hash = _sha256_file(staged_output)
+        if output_file.exists() and not overwrite:
+            raise FileExistsError(
+                "Output PSD appeared during processing; refusing to overwrite: "
+                + str(output_file)
+            )
+        os.replace(staged_output, output_file)
+        if _sha256_file(output_file) != staged_hash:
+            raise PhotoshopBridgeError(
+                "apply_organize_plan",
+                "Final PSD differs from its verified staging file.",
+                exception_type="OutputIntegrityError",
+            )
+
+        return {
+            "passed": True,
+            "input_psd": str(source_file),
+            "output_psd": str(output_file),
+            "source_sha256_unchanged": True,
+            "source_layer_tree_sha256": before["layer_tree_sha256"],
+            "output_layer_tree_sha256": after["layer_tree_sha256"],
+            "operation_count": len(normalized["operations"]),
+            "layer_count_before": before["layer_count"],
+            "layer_count_after": after["layer_count"],
+            "group_count_after": after["group_count"],
+            "text_layer_count_after": after["text_layer_count"],
+            "smart_object_count_after": after["smart_object_count"],
+            "operations": normalized["operations"],
+            "verified_references": verified_refs,
+        }
+    finally:
+        for temporary in (temp_input, staged_output):
+            try:
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Stage 9B: evidence-grounded semantic classifications and plan drafts
+# ---------------------------------------------------------------------------
+
+PSD_SEMANTIC_ROLES = (
+    "panel_group",
+    "panel_image",
+    "panel_label",
+    "scale_bar",
+    "scale_label",
+    "axis",
+    "axis_label",
+    "legend",
+    "title",
+    "annotation",
+    "decoration",
+    "background",
+    "test_artifact",
+    "unknown",
+)
+
+PSD_CLASSIFICATION_EVIDENCE_TYPES = (
+    "layer_name",
+    "layer_type",
+    "layer_metadata",
+    "text_content",
+    "geometry",
+    "visual_preview",
+    "composite_context",
+    "user_instruction",
+)
+
+PSD_LAYER_METADATA_EVIDENCE_FIELDS = (
+    "typename",
+    "kind",
+    "visible",
+    "opacity",
+    "blend_mode",
+    "is_background",
+    "all_locked",
+    "position_locked",
+    "pixels_locked",
+    "clipped_to_below",
+)
+
+
+def _load_json_object(
+    value: Dict[str, Any] | str | Path,
+    field: str,
+) -> tuple[Dict[str, Any], Optional[Path]]:
+    if isinstance(value, (str, Path)):
+        path = Path(value).expanduser().resolve(strict=True)
+        if not path.is_file() or path.suffix.lower() != ".json":
+            raise ValueError(field + " must be an existing JSON file.")
+        loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(loaded, dict):
+            raise ValueError(field + " must contain a JSON object.")
+        return loaded, path
+    if not isinstance(value, dict):
+        raise ValueError(field + " must be a dictionary or JSON path.")
+    loaded = json.loads(json.dumps(value, ensure_ascii=False))
+    return loaded, None
+
+
+def _suggest_psd_semantic_role(
+    layer: Dict[str, Any],
+    layer_by_key: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return a conservative metadata/name-pattern hint, never a final classification."""
+    key = str(layer.get("node_key", ""))
+    name = str(layer.get("name", ""))
+    typename = layer.get("typename")
+    kind = layer.get("kind")
+    text_data = layer.get("text") if isinstance(layer.get("text"), dict) else {}
+    text_value = str(text_data.get("contents", "")).strip()
+
+    def parent_layer() -> Optional[Dict[str, Any]]:
+        parent_key = layer.get("parent_key")
+        return layer_by_key.get(parent_key) if isinstance(parent_key, str) else None
+
+    parent = parent_layer()
+    parent_name = str(parent.get("name", "")) if parent else ""
+
+    def suffix_after(prefix: str) -> Optional[str]:
+        if not name.startswith(prefix):
+            return None
+        suffix = name[len(prefix):]
+        return suffix if len(suffix) == 1 and suffix.isalpha() else None
+
+    candidate: Optional[str] = None
+    basis: list[str] = []
+    rationale = ""
+
+    if layer.get("is_background") is True:
+        candidate = "background"
+        basis = ["photoshop_is_background_flag"]
+        rationale = "Photoshop explicitly marks this node as the document Background layer."
+    elif typename == "LayerSet" and suffix_after("Group_Panel_") is not None:
+        candidate = "panel_group"
+        basis = ["layer_name_pattern", "photoshop_layer_set_type"]
+        rationale = (
+            "The name follows Group_Panel_<letter> and Photoshop reports a LayerSet; "
+            "this is a structural naming hint, not visual confirmation of panel contents."
+        )
+    elif kind == "LayerKind.TEXT" and suffix_after("Panel_Label_") is not None:
+        suffix = suffix_after("Panel_Label_")
+        if text_value == suffix:
+            candidate = "panel_label"
+            basis = ["layer_name_pattern", "native_text_type", "matching_text_content"]
+            rationale = (
+                "The editable text layer name and its one-letter text content share "
+                "the same panel suffix."
+            )
+    elif kind == "LayerKind.SMARTOBJECT" and suffix_after("Image_Panel_") is not None:
+        suffix = suffix_after("Image_Panel_")
+        if parent_name == "Group_Panel_" + str(suffix):
+            candidate = "panel_image"
+            basis = ["layer_name_pattern", "smart_object_type", "matching_parent_group"]
+            rationale = (
+                "The Smart Object name and its immediate parent panel group share "
+                "the same suffix."
+            )
+    elif kind == "LayerKind.TEXT" and suffix_after("Scale_Label_") is not None:
+        if parent_name == "Group_Panel_" + str(suffix_after("Scale_Label_")) and text_value:
+            candidate = "scale_label"
+            basis = ["layer_name_pattern", "native_text_type", "parent_panel_group", "text_content_present"]
+            rationale = (
+                "The editable text layer follows the Scale_Label pattern, is inside "
+                "the correspondingly named panel group, and contains text."
+            )
+    elif typename == "ArtLayer" and (
+        name.startswith("Scale_Bar_") or name.startswith("Scale_Bar_Outline_")
+    ):
+        suffix = (
+            name[len("Scale_Bar_Outline_"):]
+            if name.startswith("Scale_Bar_Outline_")
+            else name[len("Scale_Bar_"):]
+        )
+        if len(suffix) == 1 and suffix.isalpha() and parent_name == "Group_Panel_" + suffix:
+            candidate = "scale_bar"
+            basis = ["layer_name_pattern", "photoshop_art_layer_type", "parent_panel_group"]
+            rationale = (
+                "The layer follows a Scale_Bar naming pattern and is inside the "
+                "correspondingly named panel group; visual inspection must confirm its appearance."
+            )
+    elif "Test" in name or "_Test_" in name:
+        candidate = "test_artifact"
+        basis = ["test_marker_in_layer_name"]
+        rationale = (
+            "The layer name contains an explicit Test marker; confirm that it is "
+            "test-only content rather than intentional figure content."
+        )
+
+    if candidate is None:
+        return {
+            "candidate_role": "unknown",
+            "status": "no_rule_match",
+            "basis": [],
+            "rationale": "No conservative metadata/name-pattern rule matched; review the preview and retain unknown if unclear.",
+            "requires_visual_confirmation": True,
+            "is_final_classification": False,
+        }
+
+    return {
+        "candidate_role": candidate,
+        "status": "candidate_only",
+        "basis": basis,
+        "rationale": rationale,
+        "requires_visual_confirmation": candidate != "background",
+        "is_final_classification": False,
+    }
+
+
+def create_psd_classification_template(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    output_path: str | Path,
+    *,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Create a complete, evidence-indexed work template without guessing visual roles."""
+    source_file = Path(input_psd).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_psd must be an existing PSD file.")
+
+    inspection, inspection_path = _load_json_object(
+        inspection_report, "inspection_report"
+    )
+    if inspection.get("schema_version") != 1 or inspection.get("passed") is not True:
+        raise ValueError("inspection_report must be a successful schema_version 1 report.")
+    if _sha256_file(source_file) != inspection.get("source_sha256"):
+        raise ValueError("The current PSD does not match inspection_report; re-inspect it.")
+
+    raw_layers = inspection.get("layers")
+    if not isinstance(raw_layers, list) or not raw_layers:
+        raise ValueError("inspection_report must contain a non-empty layers array.")
+    layer_by_key: Dict[str, Dict[str, Any]] = {}
+    for layer in raw_layers:
+        if not isinstance(layer, dict) or not isinstance(layer.get("node_key"), str):
+            raise ValueError("inspection_report contains a malformed layer entry.")
+        key = layer["node_key"]
+        if key in layer_by_key:
+            raise ValueError("inspection_report contains duplicate node_key: " + key)
+        layer_by_key[key] = layer
+
+    preview_by_key: Dict[str, Dict[str, Any]] = {}
+    preview_root: Optional[Path] = None
+    composite_path: Optional[Path] = None
+    if preview_report is not None:
+        preview_manifest, preview_path = _load_json_object(
+            preview_report, "preview_report"
+        )
+        if preview_manifest.get("source_sha256") != inspection.get("source_sha256"):
+            raise ValueError("Preview report source_sha256 does not match inspection report.")
+        if preview_manifest.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+            raise ValueError("Preview report layer_tree_sha256 does not match inspection report.")
+        preview_dir_value = preview_manifest.get("preview_dir")
+        if isinstance(preview_dir_value, str) and preview_dir_value.strip():
+            preview_root = Path(preview_dir_value).expanduser().resolve()
+        elif preview_path is not None:
+            preview_root = preview_path.parent.resolve()
+        else:
+            raise ValueError("preview_report must provide preview_dir.")
+        raw_previews = preview_manifest.get("previews")
+        if not isinstance(raw_previews, list):
+            raise ValueError("preview_report must contain a previews array.")
+        for item in raw_previews:
+            if not isinstance(item, dict) or not isinstance(item.get("node_key"), str):
+                raise ValueError("preview_report contains a malformed preview entry.")
+            key = item["node_key"]
+            if key not in layer_by_key:
+                raise ValueError("preview_report references an unknown node_key: " + key)
+            if key in preview_by_key:
+                raise ValueError("preview_report contains duplicate node_key: " + key)
+            status = item.get("status")
+            if status not in ("OK", "ERROR"):
+                raise ValueError("preview_report contains an invalid preview status: " + key)
+            preview_by_key[key] = item
+
+        for key, item in preview_by_key.items():
+            if item.get("status") != "OK":
+                continue
+            filename = item.get("file_name")
+            if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+                raise ValueError("Successful preview has an unsafe file_name: " + key)
+            preview_file = (preview_root / filename).resolve()
+            try:
+                preview_file.relative_to(preview_root)
+            except ValueError as exc:
+                raise ValueError("Preview file path escapes preview_dir: " + key) from exc
+            if not preview_file.is_file() or preview_file.stat().st_size <= 0:
+                raise ValueError("Successful preview file is missing or empty: " + str(preview_file))
+
+        composite_value = preview_manifest.get("composite_preview")
+        if composite_value:
+            composite_path = Path(composite_value).expanduser().resolve()
+            if not composite_path.is_file() or composite_path.stat().st_size <= 0:
+                raise ValueError("Composite preview is missing or empty.")
+
+    nodes: list[Dict[str, Any]] = []
+    background_count = 0
+    preview_success_count = 0
+    preview_failure_count = 0
+    missing_preview_keys: list[str] = []
+
+    for layer in raw_layers:
+        key = layer["node_key"]
+        role_suggestion = _suggest_psd_semantic_role(layer, layer_by_key)
+        evidence_candidates: list[Dict[str, Any]] = [
+            {"type": "layer_name", "observation": layer["name"]},
+            {"type": "layer_type", "observation": layer["kind"] or layer["typename"]},
+        ]
+        bounds = layer.get("bounds_px")
+        if (
+            isinstance(bounds, list)
+            and len(bounds) == 4
+            and all(
+                value is not None
+                and not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                for value in bounds
+            )
+        ):
+            evidence_candidates.append({
+                "type": "geometry",
+                "observation": "Exact Photoshop layer bounds in document pixels.",
+                "bounds_px": bounds,
+            })
+        text_data = layer.get("text")
+        if isinstance(text_data, dict) and isinstance(text_data.get("contents"), str) and text_data["contents"]:
+            evidence_candidates.append({
+                "type": "text_content",
+                "observation": text_data["contents"],
+            })
+        metadata_fields = {
+            field: layer[field]
+            for field in PSD_LAYER_METADATA_EVIDENCE_FIELDS
+            if field in layer and layer[field] is not None
+        }
+        evidence_candidates.append({
+            "type": "layer_metadata",
+            "observation": "Exact Photoshop layer properties copied from the read-only inspection.",
+            "fields": metadata_fields,
+        })
+
+        is_background = layer.get("is_background") is True
+        preview_item = preview_by_key.get(key)
+        preview_info = None
+        if is_background:
+            preview_info = {
+                "status": "SKIPPED_BACKGROUND",
+                "visual_review_required": False,
+            }
+        elif preview_item is None:
+            missing_preview_keys.append(key)
+        elif preview_item.get("status") == "OK":
+            preview_success_count += 1
+            preview_info = {
+                "status": "OK",
+                "file_name": preview_item.get("file_name"),
+                "path": str(preview_root / preview_item["file_name"]) if preview_root else None,
+                "visual_review_required": True,
+            }
+        else:
+            preview_failure_count += 1
+            preview_info = {
+                "status": "ERROR",
+                "error": preview_item.get("error"),
+                "visual_review_required": True,
+            }
+
+        if is_background:
+            background_count += 1
+            seed = {
+                "role": "background",
+                "confidence": 1.0,
+                "rationale": (
+                    "Photoshop explicitly identifies this node as the document Background layer; "
+                    "this is a structural classification, not an inference about figure content."
+                ),
+                "evidence": [{
+                    "type": "layer_metadata",
+                    "observation": "Photoshop marks this node as the document Background layer.",
+                    "fields": {"is_background": True},
+                }],
+                "status": "metadata_confirmed",
+            }
+        else:
+            seed = {
+                "role": "unknown",
+                "confidence": None,
+                "rationale": None,
+                "evidence": [],
+                "status": "pending_agent_review",
+            }
+
+        nodes.append({
+            "node_key": key,
+            "parent_key": layer.get("parent_key"),
+            "stack_index": layer.get("stack_index"),
+            "depth": layer.get("depth"),
+            "path": layer.get("path"),
+            "name": layer.get("name"),
+            "typename": layer.get("typename"),
+            "kind": layer.get("kind"),
+            "bounds_px": bounds,
+            "visible": layer.get("visible"),
+            "is_background": is_background,
+            "text": text_data,
+            "classification_seed": seed,
+            "role_suggestion": role_suggestion,
+            "available_evidence": evidence_candidates,
+            "isolated_preview": preview_info,
+        })
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".json":
+        raise ValueError("output_path must end in .json.")
+    if output_file.exists():
+        raise FileExistsError("Classification template already exists: " + str(output_file))
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    non_background_count = len(raw_layers) - background_count
+    preview_coverage = (
+        preview_success_count == non_background_count
+        and preview_failure_count == 0
+        and not missing_preview_keys
+    ) if preview_report is not None else False
+
+    template = {
+        "schema_version": 1,
+        "template_only": True,
+        "template_type": "psd_semantic_classification_work_template",
+        "requires_agent_review": True,
+        "requires_user_approval_for_organization": True,
+        "source_psd": str(source_file),
+        "source_sha256": inspection["source_sha256"],
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "inspection_report": str(inspection_path) if inspection_path else None,
+        "preview_report": str(preview_report) if isinstance(preview_report, (str, Path)) else None,
+        "summary": {
+            "inspection_layer_count": len(raw_layers),
+            "background_layer_count": background_count,
+            "non_background_node_count": non_background_count,
+            "preview_success_count": preview_success_count,
+            "preview_failure_count": preview_failure_count,
+            "missing_preview_node_keys": missing_preview_keys,
+            "full_visual_coverage": preview_coverage,
+            "composite_preview": str(composite_path) if composite_path else None,
+        },
+        "classification_policy": {
+            "do_not_infer_scientific_meaning_from_layer_names_alone": True,
+            "use_unknown_when_visual_purpose_is_unclear": True,
+            "only_claim_visual_review_after_opening_the_referenced_preview": True,
+            "background_role_is_derived_only_from_photoshop_is_background_flag": True,
+            "do_not_create_organizer_operations_during_classification": True,
+            "role_suggestions_are_hints_not_final_classifications": True,
+            "non_background_role_suggestions_require_preview_review": True,
+        },
+        "nodes": nodes,
+    }
+
+    temp_file = output_file.with_name(output_file.stem + ".tmp" + output_file.suffix)
+    try:
+        temp_file.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_file, output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return {
+        "passed": True,
+        "template_only": True,
+        "requires_agent_review": True,
+        "output_path": str(output_file),
+        "node_count": len(nodes),
+        "background_count": background_count,
+        "non_background_node_count": non_background_count,
+        "preview_success_count": preview_success_count,
+        "preview_failure_count": preview_failure_count,
+        "full_visual_coverage": preview_coverage,
+        "plan_operations_created": False,
+        "template_sha256": _sha256_file(output_file),
+    }
+
+
+def finalize_psd_classification_template(
+    template_path: str | Path,
+    output_path: str | Path,
+) -> Dict[str, Any]:
+    """Convert a fully reviewed work template into a validated classification report."""
+    template_file = Path(template_path).expanduser().resolve(strict=True)
+    if not template_file.is_file() or template_file.suffix.lower() != ".json":
+        raise ValueError("template_path must be an existing JSON file.")
+    template, _ = _load_json_object(template_file, "classification_template")
+    if template.get("schema_version") != 1 or template.get("template_type") != "psd_semantic_classification_work_template":
+        raise ValueError("Unsupported PSD classification work template.")
+    if template.get("template_only") is not True:
+        raise ValueError("Input must be an unfinalized classification work template.")
+
+    source_value = template.get("source_psd")
+    inspection_value = template.get("inspection_report")
+    preview_value = template.get("preview_report")
+    if not all(isinstance(value, str) and value.strip() for value in (
+        source_value, inspection_value, preview_value
+    )):
+        raise ValueError(
+            "Template must reference source_psd, inspection_report, and preview_report files."
+        )
+
+    source_file = Path(source_value).expanduser().resolve(strict=True)
+    inspection_file = Path(inspection_value).expanduser().resolve(strict=True)
+    preview_file = Path(preview_value).expanduser().resolve(strict=True)
+    inspection, _ = _load_json_object(inspection_file, "inspection_report")
+    preview_manifest, _ = _load_json_object(preview_file, "preview_report")
+
+    if _sha256_file(source_file) != template.get("source_sha256"):
+        raise ValueError("The source PSD no longer matches the classification template.")
+    if inspection.get("source_sha256") != template.get("source_sha256"):
+        raise ValueError("Inspection report source hash does not match the classification template.")
+    if inspection.get("layer_tree_sha256") != template.get("layer_tree_sha256"):
+        raise ValueError("Inspection report layer-tree hash does not match the classification template.")
+    if preview_manifest.get("source_sha256") != template.get("source_sha256"):
+        raise ValueError("Preview report source hash does not match the classification template.")
+    if preview_manifest.get("layer_tree_sha256") != template.get("layer_tree_sha256"):
+        raise ValueError("Preview report layer-tree hash does not match the classification template.")
+
+    summary = template.get("summary")
+    if not isinstance(summary, dict) or summary.get("full_visual_coverage") is not True:
+        raise ValueError("Classification finalization requires complete isolated-preview coverage.")
+    if summary.get("preview_failure_count") != 0 or summary.get("missing_preview_node_keys") != []:
+        raise ValueError("Classification template contains failed or missing isolated previews.")
+
+    nodes = template.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError("Classification template must contain a non-empty nodes array.")
+    if len(nodes) != inspection.get("layer_count"):
+        raise ValueError("Classification template node count does not match inspection report.")
+
+    seen: set[str] = set()
+    classifications: list[Dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("node_key"), str):
+            raise ValueError("Classification template contains a malformed node.")
+        key = node["node_key"]
+        if key in seen:
+            raise ValueError("Classification template contains duplicate node_key: " + key)
+        seen.add(key)
+
+        seed = node.get("classification_seed")
+        if not isinstance(seed, dict):
+            raise ValueError("Classification seed is missing for " + key)
+        status = seed.get("status")
+        expected_status = "metadata_confirmed" if node.get("is_background") is True else "agent_reviewed"
+        if status != expected_status:
+            raise ValueError(
+                "Node has not completed the required review state: "
+                + key + " (expected " + expected_status + ")"
+            )
+
+        role = seed.get("role")
+        if role not in PSD_SEMANTIC_ROLES:
+            raise ValueError("Node has an unsupported or unresolved final role: " + key)
+        confidence = seed.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValueError("Node requires a finite confidence in [0, 1]: " + key)
+        rationale = seed.get("rationale")
+        if not isinstance(rationale, str) or len(rationale.strip()) < 8:
+            raise ValueError("Node requires a substantive classification rationale: " + key)
+        evidence = seed.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("Node requires classification evidence: " + key)
+        if node.get("is_background") is not True:
+            has_visual = any(
+                isinstance(item, dict) and item.get("type") == "visual_preview"
+                for item in evidence
+            )
+            if not has_visual:
+                raise ValueError(
+                    "Every non-background node requires reviewed visual_preview evidence: " + key
+                )
+        classifications.append({
+            "node_key": key,
+            "role": role,
+            "confidence": float(confidence),
+            "rationale": rationale.strip(),
+            "evidence": evidence,
+        })
+
+    expected_keys = {layer.get("node_key") for layer in inspection.get("layers", [])}
+    if seen != expected_keys:
+        missing = sorted(expected_keys - seen)
+        extra = sorted(seen - expected_keys)
+        raise ValueError(
+            "Classification template does not match the inspected node inventory; "
+            + "missing=" + ", ".join(str(x) for x in missing)
+            + "; extra=" + ", ".join(str(x) for x in extra)
+        )
+
+    classification_report = {
+        "schema_version": 1,
+        "source_sha256": template["source_sha256"],
+        "layer_tree_sha256": template["layer_tree_sha256"],
+        "classifications": classifications,
+    }
+
+    # Run the same strict evidence/role validator used by plan drafting before
+    # writing any finalized report. Invalid reports never reach disk.
+    validation = validate_psd_classification(
+        source_file,
+        inspection_file,
+        classification_report,
+        preview_report=preview_file,
+    )
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".json":
+        raise ValueError("output_path must end in .json.")
+    if output_file == template_file:
+        raise ValueError("Final classification report must not overwrite its work template.")
+    if output_file.exists():
+        raise FileExistsError("Classification output already exists: " + str(output_file))
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_file = output_file.with_name(output_file.stem + ".tmp" + output_file.suffix)
+    try:
+        temp_file.write_text(
+            json.dumps(classification_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_file, output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return {
+        "passed": True,
+        "output_path": str(output_file),
+        "classification_count": len(classifications),
+        "role_counts": validation["role_counts"],
+        "warnings": validation["warnings"],
+        "classification_sha256": _sha256_file(output_file),
+        "template_preserved": template_file.is_file(),
+        "requires_user_approval_for_organization": True,
+        "organizer_operations_created": False,
+    }
+
+
+def _validate_classification_report(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    classification_report: Dict[str, Any] | str | Path,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Validate semantic labels against a specific PSD tree and evidence index."""
+    source_file = Path(input_psd).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_psd must be an existing PSD file.")
+
+    inspection, inspection_path = _load_json_object(
+        inspection_report, "inspection_report"
+    )
+    classification, classification_path = _load_json_object(
+        classification_report, "classification_report"
+    )
+
+    if inspection.get("schema_version") != 1 or inspection.get("passed") is not True:
+        raise ValueError("inspection_report must be a successful schema_version 1 report.")
+    if classification.get("schema_version") != 1:
+        raise ValueError("classification_report schema_version must be 1.")
+    if classification.get("source_sha256") != inspection.get("source_sha256"):
+        raise ValueError("Classification source_sha256 does not match inspection report.")
+    if classification.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+        raise ValueError("Classification layer_tree_sha256 does not match inspection report.")
+
+    source_hash = _sha256_file(source_file)
+    if source_hash != inspection.get("source_sha256"):
+        raise ValueError(
+            "The current PSD does not match the inspection report source_sha256; re-inspect it."
+        )
+
+    raw_layers = inspection.get("layers")
+    if not isinstance(raw_layers, list) or not raw_layers:
+        raise ValueError("inspection_report must contain a non-empty layers array.")
+    layer_by_key: Dict[str, Dict[str, Any]] = {}
+    for layer in raw_layers:
+        if not isinstance(layer, dict) or not isinstance(layer.get("node_key"), str):
+            raise ValueError("inspection_report contains a malformed layer entry.")
+        key = layer["node_key"]
+        if key in layer_by_key:
+            raise ValueError("inspection_report contains duplicate node_key: " + key)
+        layer_by_key[key] = layer
+
+    available_previews: Dict[str, Dict[str, Any]] = {}
+    preview_manifest: Optional[Dict[str, Any]] = None
+    preview_path: Optional[Path] = None
+    if preview_report is not None:
+        preview_manifest, preview_path = _load_json_object(
+            preview_report, "preview_report"
+        )
+        if preview_manifest.get("source_sha256") != inspection.get("source_sha256"):
+            raise ValueError("Preview report source_sha256 does not match inspection report.")
+        if preview_manifest.get("layer_tree_sha256") != inspection.get("layer_tree_sha256"):
+            raise ValueError("Preview report layer_tree_sha256 does not match inspection report.")
+        preview_items = preview_manifest.get("previews")
+        if not isinstance(preview_items, list):
+            raise ValueError("preview_report must contain a previews array.")
+        for item in preview_items:
+            if not isinstance(item, dict) or not isinstance(item.get("node_key"), str):
+                raise ValueError("preview_report contains a malformed preview entry.")
+            if item["node_key"] in available_previews:
+                raise ValueError("preview_report contains duplicate node_key: " + item["node_key"])
+            available_previews[item["node_key"]] = item
+        preview_dir_value = preview_manifest.get("preview_dir")
+        if isinstance(preview_dir_value, str) and preview_dir_value.strip():
+            preview_root = Path(preview_dir_value).expanduser().resolve()
+        elif preview_path is not None:
+            preview_root = preview_path.parent
+        else:
+            raise ValueError("preview_report must provide preview_dir when passed as an object.")
+        for item in preview_items:
+            if item.get("status") != "OK":
+                continue
+            filename = item.get("file_name")
+            if not isinstance(filename, str) or not filename:
+                raise ValueError("Successful preview entry is missing file_name.")
+            preview_file = (preview_root / filename).resolve()
+            try:
+                preview_file.relative_to(preview_root.resolve())
+            except ValueError as exc:
+                raise ValueError("Preview file path escapes the preview directory.") from exc
+            if not preview_file.is_file() or preview_file.stat().st_size <= 0:
+                raise ValueError("Preview file is missing or empty: " + str(preview_file))
+
+        contact = preview_manifest.get("contact_sheet")
+        if isinstance(contact, dict) and contact.get("path"):
+            contact_file = Path(contact["path"]).expanduser().resolve()
+            if not contact_file.is_file() or contact_file.stat().st_size <= 0:
+                raise ValueError("Preview contact sheet is missing or empty.")
+        composite_value = preview_manifest.get("composite_preview")
+        if composite_value:
+            composite_file = Path(composite_value).expanduser().resolve()
+            if not composite_file.is_file() or composite_file.stat().st_size <= 0:
+                raise ValueError("Composite preview is missing or empty.")
+
+    classifications = classification.get("classifications")
+    if not isinstance(classifications, list):
+        raise ValueError("classification_report must contain a classifications array.")
+
+    seen: set[str] = set()
+    normalized: list[Dict[str, Any]] = []
+    warnings: list[str] = []
+    role_counts: Dict[str, int] = {}
+    for index, item in enumerate(classifications):
+        if not isinstance(item, dict):
+            raise ValueError("Classification entry " + str(index) + " must be an object.")
+        key = item.get("node_key")
+        if not isinstance(key, str) or key not in layer_by_key:
+            raise ValueError("Classification references an unknown node_key: " + str(key))
+        if key in seen:
+            raise ValueError("Duplicate classification node_key: " + key)
+        seen.add(key)
+
+        role = item.get("role")
+        if role not in PSD_SEMANTIC_ROLES:
+            raise ValueError(
+                "Unsupported semantic role for " + key + ": " + str(role)
+            )
+        confidence = item.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValueError("Classification confidence must be a finite number in [0, 1]: " + key)
+
+        rationale = item.get("rationale")
+        if not isinstance(rationale, str) or len(rationale.strip()) < 8:
+            raise ValueError("Classification rationale must contain at least 8 characters: " + key)
+
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("Every classification requires at least one evidence item: " + key)
+        normalized_evidence: list[Dict[str, Any]] = []
+        has_visual_evidence = False
+        for evidence_index, evidence_item in enumerate(evidence):
+            if not isinstance(evidence_item, dict):
+                raise ValueError("Evidence item must be an object: " + key)
+            evidence_type = evidence_item.get("type")
+            if evidence_type not in PSD_CLASSIFICATION_EVIDENCE_TYPES:
+                raise ValueError(
+                    "Unsupported evidence type for " + key + ": " + str(evidence_type)
+                )
+            observation = evidence_item.get("observation")
+            if not isinstance(observation, str) or len(observation.strip()) < 3:
+                raise ValueError("Evidence observation is too short: " + key)
+            normalized_item = {
+                "type": evidence_type,
+                "observation": observation.strip(),
+            }
+            source_layer = layer_by_key[key]
+            if evidence_type == "layer_name":
+                if observation.strip() != source_layer["name"]:
+                    raise ValueError(
+                        "layer_name evidence must quote the exact inspected layer name: " + key
+                    )
+                normalized_item["observed_name"] = source_layer["name"]
+            elif evidence_type == "layer_type":
+                if observation.strip() not in (
+                    source_layer["kind"], source_layer["typename"]
+                ):
+                    raise ValueError(
+                        "layer_type evidence does not match the inspected node type: " + key
+                    )
+                normalized_item["observed_kind"] = source_layer["kind"]
+            elif evidence_type == "layer_metadata":
+                fields = evidence_item.get("fields")
+                if not isinstance(fields, dict) or not fields:
+                    raise ValueError("layer_metadata evidence requires a non-empty fields object: " + key)
+                unsupported_fields = sorted(set(fields) - set(PSD_LAYER_METADATA_EVIDENCE_FIELDS))
+                if unsupported_fields:
+                    raise ValueError(
+                        "layer_metadata evidence contains unsupported fields for "
+                        + key + ": " + ", ".join(unsupported_fields)
+                    )
+                for field_name, observed_value in fields.items():
+                    if field_name not in source_layer:
+                        raise ValueError(
+                            "layer_metadata evidence references an unavailable inspected field: "
+                            + key + "/" + field_name
+                        )
+                    actual_value = source_layer[field_name]
+                    if type(observed_value) is not type(actual_value) or observed_value != actual_value:
+                        raise ValueError(
+                            "layer_metadata evidence does not match inspected value: "
+                            + key + "/" + field_name
+                        )
+                normalized_item["fields"] = fields
+            elif evidence_type == "geometry":
+                observed_bounds = evidence_item.get("bounds_px")
+                actual_bounds = source_layer.get("bounds_px")
+                if (
+                    not isinstance(observed_bounds, list)
+                    or not isinstance(actual_bounds, list)
+                    or len(observed_bounds) != 4
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in observed_bounds
+                    )
+                    or any(
+                        actual is None
+                        or abs(float(observed) - float(actual)) > 0.01
+                        for observed, actual in zip(observed_bounds, actual_bounds)
+                    )
+                ):
+                    raise ValueError(
+                        "geometry evidence bounds_px do not match the inspected layer: " + key
+                    )
+                normalized_item["bounds_px"] = actual_bounds
+            if evidence_type == "visual_preview":
+                preview_key = evidence_item.get("preview_node_key", key)
+                if preview_key != key:
+                    raise ValueError(
+                        "visual_preview evidence must cite the same node_key: " + key
+                    )
+                preview = available_previews.get(key)
+                if preview_report is None or preview is None or preview.get("status") != "OK":
+                    raise ValueError(
+                        "visual_preview evidence has no successful preview for " + key
+                    )
+                normalized_item["preview_node_key"] = key
+                normalized_item["preview_file"] = preview["file_name"]
+                has_visual_evidence = True
+            elif evidence_type == "composite_context":
+                if preview_manifest is None:
+                    raise ValueError(
+                        "composite_context evidence requires a preview_report: " + key
+                    )
+                if not preview_manifest.get("composite_preview"):
+                    raise ValueError("Preview report has no composite preview.")
+                normalized_item["preview_file"] = "composite.png"
+                has_visual_evidence = True
+            elif evidence_type == "text_content":
+                layer_text = layer_by_key[key].get("text")
+                if not isinstance(layer_text, dict) or not layer_text.get("contents"):
+                    raise ValueError(
+                        "text_content evidence requires a native text layer with readable contents: "
+                        + key
+                    )
+                if observation.strip() not in str(layer_text["contents"]):
+                    raise ValueError(
+                        "text_content evidence must quote text actually present in the native text layer: "
+                        + key
+                    )
+                normalized_item["observed_text"] = layer_text["contents"]
+            elif evidence_type == "user_instruction":
+                source = evidence_item.get("source")
+                if source != "user":
+                    raise ValueError(
+                        "user_instruction evidence must set source='user': " + key
+                    )
+                normalized_item["source"] = "user"
+            normalized_evidence.append(normalized_item)
+
+        if role != "unknown" and float(confidence) < 0.45:
+            warnings.append(
+                key + " is classified as " + role
+                + " with low confidence; consider role='unknown'."
+            )
+        if role in ("panel_image", "legend", "axis", "decoration") and not has_visual_evidence:
+            warnings.append(
+                key + " uses a visual semantic role without visual evidence."
+            )
+        if role == "background" and source_layer.get("is_background") is not True:
+            raise ValueError(
+                "background role requires Photoshop's native is_background flag: " + key
+            )
+        if source_layer.get("is_background") is True and role != "background":
+            raise ValueError(
+                "Photoshop's native Background layer must use role='background': " + key
+            )
+        if role == "background" and not any(
+            item["type"] == "layer_metadata"
+            and item.get("fields", {}).get("is_background") is True
+            for item in normalized_evidence
+        ):
+            raise ValueError(
+                "background role requires validated layer_metadata evidence for is_background=true: "
+                + key
+            )
+        if role == "panel_group" and source_layer["typename"] != "LayerSet":
+            raise ValueError("panel_group role requires a LayerSet: " + key)
+        if role == "panel_image" and (
+            source_layer["typename"] != "ArtLayer"
+            or source_layer["kind"] == "LayerKind.TEXT"
+        ):
+            raise ValueError("panel_image role requires a non-text ArtLayer: " + key)
+        if role in ("panel_label", "scale_label", "axis_label") and source_layer["kind"] != "LayerKind.TEXT":
+            warnings.append(
+                key + " is classified as " + role
+                + " but is not an editable native text layer."
+            )
+
+        role_counts[role] = role_counts.get(role, 0) + 1
+        normalized.append({
+            "node_key": key,
+            "path": layer_by_key[key]["path"],
+            "name": layer_by_key[key]["name"],
+            "kind": layer_by_key[key]["kind"],
+            "role": role,
+            "confidence": float(confidence),
+            "rationale": rationale.strip(),
+            "evidence": normalized_evidence,
+        })
+
+    missing = sorted(set(layer_by_key) - seen)
+    if missing:
+        raise ValueError(
+            "Classification report must account for every inspected node; missing: "
+            + ", ".join(missing)
+        )
+
+    classification_digest = hashlib.sha256(
+        json.dumps(classification, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if classification_path is not None:
+        classification_digest = _sha256_file(classification_path)
+
+    return {
+        "schema_version": 1,
+        "passed": True,
+        "input_psd": str(source_file),
+        "source_sha256": source_hash,
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "inspection_report": str(inspection_path) if inspection_path else None,
+        "preview_report": str(preview_path) if preview_path else None,
+        "classification_report": str(classification_path) if classification_path else None,
+        "classification_sha256": classification_digest,
+        "layer_count": len(layer_by_key),
+        "classified_count": len(normalized),
+        "role_counts": role_counts,
+        "warnings": warnings,
+        "classifications": normalized,
+    }
+
+
+def validate_psd_classification(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    classification_report: Dict[str, Any] | str | Path,
+    *,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Validate a model-authored semantic classification without editing the PSD."""
+    return _validate_classification_report(
+        input_psd,
+        inspection_report,
+        classification_report,
+        preview_report,
+    )
+
+
+def _assess_organize_plan_risk(
+    operations: list[Dict[str, Any]],
+    inspection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build a user-facing risk and approval summary for a validated organizer plan."""
+    source_layers = {
+        layer["node_key"]: layer for layer in inspection.get("layers", [])
+    }
+    created_groups = {
+        operation["key"]: operation
+        for operation in operations
+        if operation["action"] == "create_group"
+    }
+
+    def layer_label(key: str) -> str:
+        layer = source_layers[key]
+        return str(layer.get("path") or key)
+
+    def container_label(key: str) -> str:
+        if key == "root":
+            return "root (document)"
+        if key in created_groups:
+            group = created_groups[key]
+            parent = container_label(group.get("parent", "root"))
+            return parent + "/" + group["name"] + " (new group)"
+        return layer_label(key)
+
+    risk_order = {"low": 1, "high": 2, "critical": 3}
+    reviews: list[Dict[str, Any]] = []
+    counts = {"low": 0, "high": 0, "critical": 0}
+
+    for index, operation in enumerate(operations, start=1):
+        action = operation["action"]
+        review: Dict[str, Any] = {
+            "operation_index": index,
+            "action": action,
+            "risk_level": "low",
+            "visual_impact": "none_expected",
+            "approval_requirement": "included_in_full_plan_approval",
+        }
+
+        if action == "create_group":
+            review.update({
+                "target": operation["name"],
+                "before": "No group exists at the proposed location.",
+                "after": "Create an empty group under " + container_label(operation["parent"]) + ".",
+                "reason": (
+                    "An empty group changes the editable layer hierarchy but does not "
+                    "move or alter existing pixels."
+                ),
+            })
+        elif action == "rename_layer":
+            layer = source_layers[operation["target"]]
+            review.update({
+                "target": layer_label(operation["target"]),
+                "before": layer["name"],
+                "after": operation["new_name"],
+                "reason": (
+                    "Renaming does not directly change rendered pixels, but external "
+                    "scripts or references that depend on the old layer name may need updating."
+                ),
+            })
+        elif action == "move_layer":
+            layer = source_layers[operation["target"]]
+            review.update({
+                "risk_level": "high",
+                "visual_impact": "possible",
+                "approval_requirement": "explicitly_reviewed_in_full_plan_approval",
+                "target": layer_label(operation["target"]),
+                "before": "Parent: " + str(layer["parent_key"]) + "; stack index: " + str(layer["stack_index"]),
+                "after": (
+                    "Parent: " + container_label(operation["destination"])
+                    + "; insert at " + operation["position"] + "."
+                ),
+                "reason": (
+                    "Reparenting changes layer context and may affect blend interactions, "
+                    "group-scoped effects, masks, or adjustment behavior even when clipping-chain "
+                    "moves are rejected."
+                ),
+            })
+        elif action == "reorder_layer":
+            layer = source_layers[operation["target"]]
+            anchor = source_layers[operation["relative_to"]]
+            review.update({
+                "risk_level": "high",
+                "visual_impact": "possible",
+                "approval_requirement": "explicitly_reviewed_in_full_plan_approval",
+                "target": layer_label(operation["target"]),
+                "before": "Stack index: " + str(layer["stack_index"]),
+                "after": (
+                    operation["position"] + " " + layer_label(operation["relative_to"])
+                    + " (reference: " + anchor["name"] + ")."
+                ),
+                "reason": (
+                    "Changing stacking order may alter occlusion, blend results, and the "
+                    "final composite."
+                ),
+            })
+        elif action == "set_visibility":
+            layer = source_layers[operation["target"]]
+            review.update({
+                "risk_level": "critical",
+                "visual_impact": "direct",
+                "approval_requirement": "must_be_explicitly_acknowledged",
+                "target": layer_label(operation["target"]),
+                "before": "visible" if layer["visible"] else "hidden",
+                "after": "visible" if operation["visible"] else "hidden",
+                "reason": (
+                    "Visibility directly changes which content contributes to the rendered figure. "
+                    "This change must be singled out in the approval request."
+                ),
+            })
+
+        counts[review["risk_level"]] += 1
+        reviews.append(review)
+
+    overall = max(counts, key=lambda level: risk_order[level])
+    if counts["critical"]:
+        approval_text = (
+            "Show every visibility change in a separate, unmistakable section. "
+            "The user must explicitly acknowledge those exact visibility changes; "
+            "a generic approval of 'organization' is insufficient. The apply CLI additionally "
+            "requires --confirm-visibility-changes."
+        )
+    elif counts["high"]:
+        approval_text = (
+            "Show each move/reorder with its exact source, destination or relative position, "
+            "and possible visual consequences. Obtain approval for the complete listed plan."
+        )
+    else:
+        approval_text = (
+            "Show the consolidated rename/grouping list and obtain approval for the complete plan."
+        )
+
+    return {
+        "schema_version": 1,
+        "overall_level": overall,
+        "counts": counts,
+        "requires_user_approval": True,
+        "approval_guidance": approval_text,
+        "operation_reviews": reviews,
+        "prohibited_automatic_actions": [
+            "delete_layer",
+            "merge_layers",
+            "flatten",
+            "rasterize",
+            "crop",
+            "resize",
+            "transform",
+            "edit_pixel_content",
+        ],
+    }
+
+
+def create_organize_plan_draft(
+    input_psd: str | Path,
+    inspection_report: Dict[str, Any] | str | Path,
+    classification_report: Dict[str, Any] | str | Path,
+    operations: list[Dict[str, Any]] | str | Path,
+    output_path: str | Path,
+    *,
+    preview_report: Optional[Dict[str, Any] | str | Path] = None,
+) -> Dict[str, Any]:
+    """Create an unapproved organizer plan after validating classification and operations."""
+    validation = validate_psd_classification(
+        input_psd,
+        inspection_report,
+        classification_report,
+        preview_report=preview_report,
+    )
+    if isinstance(operations, (str, Path)):
+        operations_path = Path(operations).expanduser().resolve(strict=True)
+        if not operations_path.is_file() or operations_path.suffix.lower() != ".json":
+            raise ValueError("operations must be an existing JSON file.")
+        raw_operations = json.loads(operations_path.read_text(encoding="utf-8-sig"))
+    else:
+        raw_operations = operations
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise ValueError("operations must be a non-empty JSON array.")
+
+    inspection, _ = _load_json_object(inspection_report, "inspection_report")
+    proposed_plan = {
+        "schema_version": 1,
+        "source_sha256": validation["source_sha256"],
+        "layer_tree_sha256": validation["layer_tree_sha256"],
+        "operations": raw_operations,
+    }
+    normalized = _validate_organize_plan(proposed_plan, inspection)
+
+    output_file = Path(output_path).expanduser().resolve()
+    if output_file.suffix.lower() != ".json":
+        raise ValueError("output_path must end in .json.")
+    if output_file.exists():
+        raise FileExistsError(
+            "Organizer plan draft already exists; choose another path: "
+            + str(output_file)
+        )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    role_counts = validation["role_counts"]
+    risk_assessment = _assess_organize_plan_risk(
+        normalized["operations"],
+        inspection,
+    )
+    draft = {
+        "schema_version": 1,
+        "plan_type": "user_review_required",
+        "requires_user_approval": True,
+        "approved": False,
+        "source_psd": validation["input_psd"],
+        "source_sha256": validation["source_sha256"],
+        "layer_tree_sha256": validation["layer_tree_sha256"],
+        "classification_sha256": validation["classification_sha256"],
+        "classification_role_counts": role_counts,
+        "classification_warnings": validation["warnings"],
+        "risk_assessment": risk_assessment,
+        "operations": normalized["operations"],
+        "verify_refs": normalized["verify_refs"],
+    }
+    serialized = json.dumps(draft, ensure_ascii=False, indent=2)
+    temp_file = output_file.with_name(output_file.stem + ".tmp" + output_file.suffix)
+    try:
+        temp_file.write_text(serialized, encoding="utf-8")
+        os.replace(temp_file, output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return {
+        "passed": True,
+        "requires_user_approval": True,
+        "approved": False,
+        "output_path": str(output_file),
+        "operation_count": len(normalized["operations"]),
+        "role_counts": role_counts,
+        "warnings": validation["warnings"],
+        "risk_assessment": risk_assessment,
+        "plan_sha256": _sha256_file(output_file),
+        "plan": draft,
+    }
+
+
 def _print_human_report(action: str, result: Dict[str, Any]) -> None:
     print("SCI FIGURE PHOTOSHOP BRIDGE")
     print("Action: " + action)
@@ -3758,9 +7049,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "prepare-existing-psd", "create-psd-classification-template", "finalize-psd-classification-template", "validate-psd-classification", "create-organize-plan-draft"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
+    )
+    parser.add_argument(
+        "--execution-mode",
+        choices=("quiet", "interactive"),
+        default="quiet",
+        help=(
+            "quiet suppresses Photoshop dialogs but still requires desktop Photoshop; "
+            "interactive permits Photoshop dialogs. Default: quiet."
+        ),
     )
     parser.add_argument(
         "--jsx-file",
@@ -3796,6 +7096,72 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-psd",
         type=Path,
         help="Input PSD for --action add-panel-labels; source is never modified.",
+    )
+    parser.add_argument(
+        "--inspection-report",
+        type=Path,
+        help="Optional JSON output path for --action inspect-psd.",
+    )
+    parser.add_argument(
+        "--organize-plan",
+        type=Path,
+        help="Approved structure-only JSON plan for --action apply-organize-plan.",
+    )
+    parser.add_argument(
+        "--classification-report",
+        type=Path,
+        help="Evidence-grounded semantic classification JSON for Stage 9B.",
+    )
+    parser.add_argument(
+        "--classification-template",
+        type=Path,
+        help="Completed Stage 9B classification work template to finalize.",
+    )
+    parser.add_argument(
+        "--preview-report",
+        type=Path,
+        help="Optional Stage 9A visual preview manifest used to verify visual evidence.",
+    )
+    parser.add_argument(
+        "--plan-operations",
+        type=Path,
+        help="JSON array of explicitly proposed structure-only operations for plan drafting.",
+    )
+    parser.add_argument(
+        "--preview-dir",
+        type=Path,
+        help="New output directory for --action preview-psd-layers.",
+    )
+    parser.add_argument(
+        "--workflow-dir",
+        type=Path,
+        help="New output directory for the complete --action prepare-existing-psd intake workflow.",
+    )
+    parser.add_argument(
+        "--workflow-max-previews",
+        type=int,
+        default=200,
+        help="Maximum isolated previews for --action prepare-existing-psd (1–200; default 200).",
+    )
+    parser.add_argument(
+        "--preview-node-key",
+        action="append",
+        help="Specific PSD node key to preview; repeat to select multiple layers/groups.",
+    )
+    parser.add_argument("--preview-max-layers", type=int, default=80)
+    parser.add_argument("--preview-width-px", type=int, default=512)
+    parser.add_argument(
+        "--confirm-plan",
+        action="store_true",
+        help="Explicitly approve the complete reviewed organizer plan on a temporary PSD copy.",
+    )
+    parser.add_argument(
+        "--confirm-visibility-changes",
+        action="store_true",
+        help=(
+            "Separately acknowledge the exact set_visibility operations in the reviewed plan. "
+            "Required only when the plan changes layer visibility."
+        ),
     )
     parser.add_argument(
         "--label-style",
@@ -3921,6 +7287,137 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "prepare-existing-psd":
+        if args.input_psd is None or args.workflow_dir is None:
+            print(
+                "ERROR: --input-psd and --workflow-dir are required "
+                "for --action prepare-existing-psd.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.input_psd.is_file():
+            print("ERROR: input PSD does not exist: " + str(args.input_psd), file=sys.stderr)
+            return 2
+        if args.workflow_dir.exists():
+            print("ERROR: workflow directory already exists: " + str(args.workflow_dir), file=sys.stderr)
+            return 2
+
+    if args.action == "inspect-psd":
+        if args.input_psd is None:
+            print(
+                "ERROR: --input-psd is required for --action inspect-psd.",
+                file=sys.stderr,
+            )
+            return 2
+
+    if args.action == "preview-psd-layers":
+        if args.input_psd is None or args.preview_dir is None:
+            print(
+                "ERROR: --input-psd and --preview-dir are required "
+                "for --action preview-psd-layers.",
+                file=sys.stderr,
+            )
+            return 2
+
+    if args.action == "create-psd-classification-template":
+        if args.input_psd is None or args.inspection_report is None or args.output is None:
+            print(
+                "ERROR: --input-psd, --inspection-report, and --output "
+                "are required for --action create-psd-classification-template.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.inspection_report.is_file():
+            print("ERROR: inspection report does not exist: " + str(args.inspection_report), file=sys.stderr)
+            return 2
+        if args.preview_report is not None and not args.preview_report.is_file():
+            print("ERROR: preview report does not exist: " + str(args.preview_report), file=sys.stderr)
+            return 2
+
+    if args.action == "finalize-psd-classification-template":
+        if args.classification_template is None or args.output is None:
+            print(
+                "ERROR: --classification-template and --output are required "
+                "for --action finalize-psd-classification-template.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.classification_template.is_file():
+            print(
+                "ERROR: classification template does not exist: "
+                + str(args.classification_template),
+                file=sys.stderr,
+            )
+            return 2
+
+    if args.action in ("validate-psd-classification", "create-organize-plan-draft"):
+        if args.input_psd is None or args.inspection_report is None or args.classification_report is None:
+            print(
+                "ERROR: --input-psd, --inspection-report, and --classification-report "
+                "are required for Stage 9B.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.inspection_report.is_file():
+            print("ERROR: inspection report does not exist: " + str(args.inspection_report), file=sys.stderr)
+            return 2
+        if not args.classification_report.is_file():
+            print("ERROR: classification report does not exist: " + str(args.classification_report), file=sys.stderr)
+            return 2
+        if args.preview_report is not None and not args.preview_report.is_file():
+            print("ERROR: preview report does not exist: " + str(args.preview_report), file=sys.stderr)
+            return 2
+    if args.action == "create-organize-plan-draft":
+        if args.plan_operations is None or args.output is None:
+            print(
+                "ERROR: --plan-operations and --output are required for "
+                "--action create-organize-plan-draft.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.plan_operations.is_file():
+            print("ERROR: plan operations file does not exist: " + str(args.plan_operations), file=sys.stderr)
+            return 2
+
+    if args.action == "apply-organize-plan":
+        if args.input_psd is None or args.organize_plan is None or args.output is None:
+            print(
+                "ERROR: --input-psd, --organize-plan, and --output are required "
+                "for --action apply-organize-plan.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.organize_plan.is_file():
+            print("ERROR: organizer plan does not exist: " + str(args.organize_plan), file=sys.stderr)
+            return 2
+        if not args.confirm_plan:
+            print(
+                "ERROR: review the organizer plan and pass --confirm-plan to apply it.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            plan_preview = json.loads(args.organize_plan.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print("ERROR: cannot read organizer plan: " + str(exc), file=sys.stderr)
+            return 2
+        plan_operations = plan_preview.get("operations", []) if isinstance(plan_preview, dict) else []
+        has_visibility_changes = (
+            isinstance(plan_operations, list)
+            and any(
+                isinstance(operation, dict)
+                and operation.get("action") == "set_visibility"
+                for operation in plan_operations
+            )
+        )
+        if has_visibility_changes and not args.confirm_visibility_changes:
+            print(
+                "ERROR: this plan changes rendered visibility. Review each exact visibility change "
+                "and pass --confirm-visibility-changes in addition to --confirm-plan.",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.action == "preflight-figure":
         if args.input_psd is None:
             print(
@@ -3945,7 +7442,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
     try:
-        bridge = PhotoshopBridge()
+        photoshop_required_actions = {
+            "diagnose",
+            "status",
+            "lock-units",
+            "exec-jsx",
+            "compose-grid",
+            "add-panel-labels",
+            "add-scale-bar",
+            "unify-fonts",
+            "export-figure",
+            "preflight-figure",
+            "inspect-psd",
+            "apply-organize-plan",
+            "preview-psd-layers",
+            "prepare-existing-psd",
+        }
+        bridge = (
+            PhotoshopBridge(execution_mode=args.execution_mode)
+            if args.action in photoshop_required_actions
+            else None
+        )
 
         if args.action == "diagnose":
             result = bridge.diagnose()
@@ -3995,6 +7512,68 @@ def main(argv: Optional[list[str]] = None) -> int:
                 font_postscript=args.unify_font_postscript,
                 size_pt=args.unify_font_size_pt,
                 color_hex=args.unify_font_color,
+                overwrite=args.overwrite,
+                bridge=bridge,
+            )
+        elif args.action == "inspect-psd":
+            result = inspect_psd(
+                args.input_psd,
+                report_path=args.inspection_report,
+                bridge=bridge,
+            )
+        elif args.action == "preview-psd-layers":
+            result = preview_psd_layers(
+                args.input_psd,
+                args.preview_dir,
+                node_keys=args.preview_node_key,
+                max_previews=args.preview_max_layers,
+                thumbnail_width_px=args.preview_width_px,
+                bridge=bridge,
+            )
+        elif args.action == "prepare-existing-psd":
+            result = prepare_existing_psd(
+                args.input_psd,
+                args.workflow_dir,
+                max_previews=args.workflow_max_previews,
+                thumbnail_width_px=args.preview_width_px,
+                bridge=bridge,
+            )
+
+        elif args.action == "create-psd-classification-template":
+            result = create_psd_classification_template(
+                args.input_psd,
+                args.inspection_report,
+                args.output,
+                preview_report=args.preview_report,
+            )
+        elif args.action == "finalize-psd-classification-template":
+            result = finalize_psd_classification_template(
+                args.classification_template,
+                args.output,
+            )
+        elif args.action == "validate-psd-classification":
+            result = validate_psd_classification(
+                args.input_psd,
+                args.inspection_report,
+                args.classification_report,
+                preview_report=args.preview_report,
+            )
+        elif args.action == "create-organize-plan-draft":
+            result = create_organize_plan_draft(
+                args.input_psd,
+                args.inspection_report,
+                args.classification_report,
+                args.plan_operations,
+                args.output,
+                preview_report=args.preview_report,
+            )
+        elif args.action == "apply-organize-plan":
+            result = apply_organize_plan(
+                args.input_psd,
+                args.organize_plan,
+                args.output,
+                approved=args.confirm_plan,
+                approved_visual_changes=args.confirm_visibility_changes,
                 overwrite=args.overwrite,
                 bridge=bridge,
             )
