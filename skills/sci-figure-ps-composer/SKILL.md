@@ -265,7 +265,7 @@ The workflow directory must be new. The command uses one shared Photoshop bridge
 
 The inspection result is passed directly into preview generation, so the same PSD layer inventory is not queried a second time. Full visual coverage is required by this workflow; the maximum is 200 non-background nodes. If coverage cannot be achieved, the command stops and preserves the inspection/preview artifacts for diagnosis. It never creates organizer operations or modifies the source PSD.
 
-The agent then reads the composite and every non-background isolated preview, completes the classification work template, and discusses any uncertain or consequential changes with the user. Classification and organization remain separate: a `test_artifact` label is not permission to hide or delete anything.
+The agent performs one consolidated semantic-review pass over the composite, layer metadata, text content, hierarchy, geometry, and isolated previews. It writes one complete classification JSON internally; the user is not asked to classify nodes one by one. It asks only about unresolved scientific meaning or proposed operations that could affect appearance or structure. Classification and organization remain separate: a `test_artifact` label is not permission to hide or delete anything. The work template is optional scaffolding, not a mandatory user-facing stage.
 
 After the user-reviewed template is complete, finalize it and create the organizer-plan draft. The `create-organize-plan-draft` action already performs strict classification validation internally; do not run `validate-psd-classification` as a redundant pre-step unless diagnosing a specific report.
 
@@ -442,20 +442,19 @@ The template deliberately does not finalize scientific roles based on layer name
 
 The example is illustrative only; a usable report must include every node in the inspection JSON exactly once. A partial Stage 9A preview run can still support metadata-based classifications, but it cannot support `visual_preview` evidence for nodes that were not previewed. Run Stage 9A with a sufficiently high `--preview-max-layers` CLI value (up to 200) when full visual coverage is needed.
 
-### Agent visual-review procedure
+### Agent visual-review procedure (single-pass default)
 
-When a classification work template is supplied, the agent must perform these steps in order:
+The agent owns the classification work. Do not turn this into a user-facing node-by-node questionnaire or a sequence of redundant CLI checks.
 
-1. Verify that the template's source SHA-256 and layer-tree fingerprint match its inspection and preview reports. Stop if any hash differs.
-2. Read the full composite preview first to understand the complete figure and panel arrangement.
-3. Review every non-background node's own isolated preview. Do not treat a contact sheet, layer name, role suggestion, or parent group as a substitute for opening the node's referenced preview.
-4. For a group, inspect its group preview and compare it with its child previews. For a text layer, compare the exact native text contents with its visual placement. For Smart Objects and raster layers, identify what is actually visible, not merely the file/layer label.
-5. Use parent, children, sibling order, geometry, visibility, lock/clipping metadata, and text content as supporting evidence. Separate what is observed from what is inferred.
-6. For every non-background node, fill `classification_seed` with a final allowed `role`, confidence, a substantive rationale, and typed evidence. Set `status: "agent_reviewed"`. Include a `visual_preview` evidence item whose `preview_node_key` is exactly the node's own key and whose observation records what was actually seen in that isolated preview. Use `unknown` when the scientific purpose remains unclear; an explicit unknown is preferable to invented certainty.
-7. Leave the native Background seed as `background` / `metadata_confirmed`. Do not change it based on its localized name or appearance.
-8. Do not create organizer operations while classifying. Classification must not rename, move, hide, reorder, delete, or merge any node.
+1. Verify the source SHA-256 and layer-tree fingerprint once against the intake manifest. Stop only if the evidence package is stale or inconsistent.
+2. Review the composite and contact sheet to understand the figure globally. Use the ordered tree, parent/child and sibling relationships, layer types, visibility, bounds, and editable text as cross-checks.
+3. Review isolated previews as needed to establish the actual visual role. Every non-background classification that cites `visual_preview` must cite a successful preview for that exact node. A contact sheet is an index, not proof of details too small to read.
+4. Classify all nodes in one pass. Use high-confidence roles where multiple independent facts agree; use `unknown` when the scientific purpose is unclear. Do not infer from a layer name alone. Hidden nodes still receive classifications.
+5. Produce one complete classification JSON with one record per inspected node, confidence, concise rationale, and evidence. The native Photoshop Background is the only role that may be confirmed from its structural metadata alone.
+6. Prepare one consolidated proposed-operations JSON only after classification. Prefer the minimum set of changes that materially improves editability and organization. Preserve stack order, visibility, clipping/mask relationships, Smart Objects, and pixel content unless a specific change is justified.
+7. Present the user only with consequential uncertainties and the complete proposed before/after operations. Do not ask the user to approve classifications that are already well-supported. Do not apply anything until the user explicitly approves the exact operations.
 
-The `role_suggestion` field is only a navigation hint. The agent may accept, downgrade, or reject it after visual review. It must never be copied blindly into the final classification seed. A candidate marked `test_artifact` should be checked against its text/visual preview and surrounding group; the name alone is not enough to declare that it is safe to remove or hide.
+The agent may generate the optional work template when it helps index a large or ambiguous PSD. For ordinary cases, it can author the complete classification report directly from the inspection report and preview manifest; it does not need to generate and then finalize a work template.
 
 ### Finalize a reviewed work template
 
