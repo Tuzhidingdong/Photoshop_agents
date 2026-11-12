@@ -371,9 +371,9 @@ Allowed roles:
 
 Each record contains a confidence in [0, 1], a concise rationale, and at least one typed evidence item. Evidence types are `layer_name`, `layer_type`, `layer_metadata`, `text_content`, `geometry`, `visual_preview`, `composite_context`, and `user_instruction`.
 
-### Generate a classification work template
+### Optional classification work template
 
-After inspection and preview generation, create an evidence-indexed template before asking the vision-capable agent to classify nodes:
+The default path is for the agent to write the complete classification JSON directly. Generate this evidence-indexed template only when it materially helps with a large, unusually complex, or ambiguous PSD; it is not a required stage:
 
 ~~~powershell
 python scripts/ps_sci_toolkit.py --action create-psd-classification-template `
@@ -456,9 +456,9 @@ The agent owns the classification work. Do not turn this into a user-facing node
 
 The agent may generate the optional work template when it helps index a large or ambiguous PSD. For ordinary cases, it can author the complete classification report directly from the inspection report and preview manifest; it does not need to generate and then finalize a work template.
 
-### Finalize a reviewed work template
+### Optional template finalization
 
-After all 19 nodes have a final classification seed (18 `agent_reviewed` plus the native Background's `metadata_confirmed`), export and validate a separate classification report:
+When the optional work-template route is used, finalize it only after every node has been reviewed. For the direct-report default, skip this stage entirely:
 
 ~~~powershell
 python scripts/ps_sci_toolkit.py --action finalize-psd-classification-template `
@@ -484,7 +484,7 @@ Evidence validation rules:
 - `user_instruction` must explicitly set `source: "user"`.
 - Confidence below 0.45 produces a warning; visual roles without visual evidence produce a warning. Warnings do not authorize automatic actions.
 
-Validate a model-authored classification:
+Optional diagnostic only — validate a standalone classification report when investigating a specific evidence or schema issue. Do not run this separately before `create-organize-plan-draft`, because plan drafting already performs the strict validation:
 
 ~~~powershell
 python scripts/ps_sci_toolkit.py --action validate-psd-classification `
@@ -731,6 +731,8 @@ A failure must not be converted into a success-shaped return value. CLI exit cod
 
 ## Validation
 
+The commands in this section are maintainer/development regression checks, not steps to repeat for each figure. For normal existing-PSD work, use the single `prepare-existing-psd` intake, one semantic-review pass, one plan-draft action, and (only after approval) one apply action. Do not rerun the full demo suite for each PSD.
+
 Run platform-independent unit tests:
 
 ~~~powershell
@@ -751,7 +753,7 @@ python tests/test_inspect_psd_demo.py --input-psd path\\to\\Figure_Grid_Stage5_F
 python tests/test_apply_organize_plan_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd
 python tests/test_preview_psd_layers_demo.py --input-psd path\\to\\Figure_Grid_Stage5_FontsUnified.psd --preview-dir path\\to\\Figure_Grid_Stage8_Layer_Previews
 
-Both Stage 8A and Stage 8B integration demos passed on Photoshop 2026 (27.9.1). Stage 9A `preview_psd_layers` passed real Photoshop verification: 12/12 selected previews were generated successfully, with a composite, contact sheet, manifest, and unchanged source PSD hash. Stage 9B classification validation and unapproved plan drafting are covered by GitHub Actions Run #158 (84 tests passed on Python 3.13); these are model-independent JSON/metadata operations and do not require a Photoshop integration test. The inspected source PSD contained 19 layers, 6 groups, 6 text layers, and 4 Smart Objects. Stage 8B moved the embedded `Image_Panel_a` Smart Object into a new test group on a separate PSD copy; the output reopened with 20 layers and preserved the original 6 text layers and 4 Smart Objects. The original PSD SHA-256 remained unchanged.
+Both Stage 8A and Stage 8B integration demos passed on Photoshop 2026 (27.9.1). Stage 9A `preview_psd_layers` passed real Photoshop verification on the user's 19-node PSD: all 18/18 non-background previews were generated successfully, with a composite, contact sheet, manifest, and unchanged source PSD hash. Stage 9B classification validation and unapproved plan drafting are covered by GitHub Actions Run #158 (84 tests passed on Python 3.13); these are model-independent JSON/metadata operations and do not require a Photoshop integration test. The inspected source PSD contained 19 layers, 6 groups, 6 text layers, and 4 Smart Objects. Stage 8B moved the embedded `Image_Panel_a` Smart Object into a new test group on a separate PSD copy; the output reopened with 20 layers and preserved the original 6 text layers and 4 Smart Objects. The original PSD SHA-256 remained unchanged.
 ~~~
 
 A bridge diagnostic pass requires COM connection, JSX execution, successful unit read-back, and controlled JSX exception capture. Each staged integration pass requires the generated PSD or export bundle to be reopened in Photoshop and its native document/layer structure or export metadata to be inspected. The Stage 7 integration pass additionally verifies that the inspected source PSD remains unchanged. Unit tests alone are not proof of Photoshop compatibility.
