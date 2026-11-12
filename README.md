@@ -15,7 +15,7 @@ Current capabilities include:
 - Normalize text-layer typography recursively.
 - Export editable PSD, RGB LZW TIFF, and PNG deliverables.
 - Run publication preflight checks for geometry, effective panel resolution, typography, calibration, and export metadata.
-- Inspect existing PSD layer trees, generate isolated visual previews, classify layers with evidence, and apply explicitly approved structure-only organization plans.
+- Inspect existing PSD layer trees, generate full-coverage isolated previews, classify layers with evidence, and draft risk-assessed organization plans. Low-risk renames/grouping and high-risk moves/reorders are reviewed together; visibility changes are separately acknowledged and require an additional execution flag. Destructive/pixel-changing operations are outside organizer v1.
 
 For an existing PSD, the recommended entry point is `prepare-existing-psd`. It produces a reusable inspection report, full-coverage layer previews, a classification work template, and a workflow manifest while reusing the same inspection inventory rather than inspecting the PSD twice.
 
