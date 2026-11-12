@@ -6956,6 +6956,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="New output directory for the complete --action prepare-existing-psd intake workflow.",
     )
     parser.add_argument(
+        "--workflow-max-previews",
+        type=int,
+        default=200,
+        help="Maximum isolated previews for --action prepare-existing-psd (1–200; default 200).",
+    )
+    parser.add_argument(
         "--preview-node-key",
         action="append",
         help="Specific PSD node key to preview; repeat to select multiple layers/groups.",
@@ -7317,7 +7323,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = prepare_existing_psd(
                 args.input_psd,
                 args.workflow_dir,
-                max_previews=args.preview_max_layers,
+                max_previews=args.workflow_max_previews,
                 thumbnail_width_px=args.preview_width_px,
                 bridge=bridge,
             )
