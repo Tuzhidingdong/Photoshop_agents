@@ -63,6 +63,7 @@ def main() -> int:
         node_keys=[layer["node_key"] for layer in selected],
         max_previews=args.max_previews,
         thumbnail_width_px=args.thumbnail_width_px,
+        inspection_report=inspection,
         bridge=bridge,
     )
 
