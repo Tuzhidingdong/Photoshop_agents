@@ -2213,6 +2213,29 @@ class OrganizePlanValidationTests(unittest.TestCase):
                 self.inspection,
             )
 
+    def test_visibility_change_requires_separate_explicit_approval_before_photoshop(self):
+        plan = self.plan([
+            {
+                "action": "set_visibility",
+                "target": "root/L2",
+                "expected_name": "Micrograph",
+                "visible": False,
+            }
+        ])
+        bridge = FakeInspectBridge(_make_inspection_response())
+
+        with self.assertRaisesRegex(PermissionError, "approved_visual_changes=True"):
+            apply_organize_plan(
+                self.input_psd,
+                plan,
+                self.root / "visibility_output.psd",
+                approved=True,
+                bridge=bridge,
+            )
+
+        # The critical approval gate runs before Photoshop is inspected or edited.
+        self.assertEqual(bridge.jsx_calls, [])
+
     def test_plan_rejects_moving_background_locked_or_clipping_layers(self):
         plan = self.plan([
             {"action": "move_layer", "target": "root/L3", "expected_name": "Background", "destination": "root/G1"}
