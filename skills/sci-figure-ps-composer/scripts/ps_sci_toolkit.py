@@ -4579,6 +4579,7 @@ def preview_psd_layers(
     node_keys: Optional[list[str]] = None,
     max_previews: int = 80,
     thumbnail_width_px: int = 512,
+    inspection_report: Optional[Dict[str, Any] | str | Path] = None,
     bridge: Optional[PhotoshopBridge] = None,
 ) -> Dict[str, Any]:
     """Create isolated previews of PSD layers/groups on disposable copies only."""
@@ -4601,7 +4602,23 @@ def preview_psd_layers(
     preview_success = False
 
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
-    inspection = inspect_psd(source_file, bridge=active_bridge)
+    if inspection_report is None:
+        inspection = inspect_psd(source_file, bridge=active_bridge)
+    else:
+        inspection, _ = _load_json_object(inspection_report, "inspection_report")
+        if inspection.get("schema_version") != 1 or inspection.get("passed") is not True:
+            raise ValueError("inspection_report must be a successful schema_version 1 report.")
+        if inspection.get("source_sha256") != _sha256_file(source_file):
+            raise ValueError("inspection_report does not match the current PSD source hash.")
+        inspected_layers = inspection.get("layers")
+        if (
+            not isinstance(inspected_layers, list)
+            or not inspected_layers
+            or inspection.get("layer_count") != len(inspected_layers)
+            or not isinstance(inspection.get("layer_tree_sha256"), str)
+            or not inspection["layer_tree_sha256"]
+        ):
+            raise ValueError("inspection_report contains an invalid layer inventory or tree fingerprint.")
     layer_by_key = {layer["node_key"]: layer for layer in inspection["layers"]}
     all_node_keys = set(layer_by_key)
     eligible_node_keys = {
@@ -4787,6 +4804,119 @@ def preview_psd_layers(
                 pass
 
 
+
+def prepare_existing_psd(
+    input_path: str | Path,
+    workflow_dir: str | Path,
+    *,
+    max_previews: int = 200,
+    thumbnail_width_px: int = 512,
+    bridge: Optional[PhotoshopBridge] = None,
+) -> Dict[str, Any]:
+    """Create one reusable inspection, full visual index, and review template for an existing PSD."""
+    source_file = Path(input_path).expanduser().resolve(strict=True)
+    if not source_file.is_file() or source_file.suffix.lower() != ".psd":
+        raise ValueError("input_path must be an existing PSD file.")
+    if not 1 <= int(max_previews) <= 200:
+        raise ValueError("max_previews must be between 1 and 200.")
+    if not 64 <= int(thumbnail_width_px) <= 2048:
+        raise ValueError("thumbnail_width_px must be between 64 and 2048.")
+
+    workspace = Path(workflow_dir).expanduser().resolve()
+    if workspace.exists():
+        raise FileExistsError(
+            "Existing-PSD workflow directory already exists; choose a new directory: "
+            + str(workspace)
+        )
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=False, exist_ok=False)
+
+    inspection_path = workspace / "inspection_report.json"
+    preview_dir = workspace / "visual_previews"
+    template_path = workspace / "classification_work_template.json"
+    manifest_path = workspace / "workflow_manifest.json"
+
+    active_bridge = bridge if bridge is not None else PhotoshopBridge()
+
+    # Inspect once and reuse the exact ordered inventory for all downstream preparation.
+    inspection = inspect_psd(
+        source_file,
+        report_path=inspection_path,
+        bridge=active_bridge,
+    )
+    preview = preview_psd_layers(
+        source_file,
+        preview_dir,
+        max_previews=max_previews,
+        thumbnail_width_px=thumbnail_width_px,
+        inspection_report=inspection,
+        bridge=active_bridge,
+    )
+    if preview.get("full_visual_coverage") is not True:
+        raise ValueError(
+            "Full visual coverage was not achieved. Review the preserved preview report before classification: "
+            + str(preview.get("report_path"))
+        )
+
+    template = create_psd_classification_template(
+        source_file,
+        inspection_path,
+        template_path,
+        preview_report=preview["report_path"],
+    )
+    source_hash_after = _sha256_file(source_file)
+    if source_hash_after != inspection["source_sha256"]:
+        raise PhotoshopBridgeError(
+            "prepare_existing_psd",
+            "The source PSD SHA-256 changed during existing-PSD preparation.",
+            exception_type="SourceIntegrityError",
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "passed": True,
+        "workflow": "prepare_existing_psd",
+        "input_psd": str(source_file),
+        "source_sha256": inspection["source_sha256"],
+        "layer_tree_sha256": inspection["layer_tree_sha256"],
+        "layer_count": inspection["layer_count"],
+        "group_count": inspection["group_count"],
+        "text_layer_count": inspection["text_layer_count"],
+        "smart_object_count": inspection["smart_object_count"],
+        "full_visual_coverage": preview["full_visual_coverage"],
+        "preview_success_count": preview["successful_count"],
+        "preview_failure_count": preview["failed_count"],
+        "artifacts": {
+            "inspection_report": str(inspection_path),
+            "composite_preview": preview["composite_preview"],
+            "layer_contact_sheet": preview["contact_sheet"]["path"],
+            "preview_report": preview["report_path"],
+            "classification_work_template": str(template_path),
+        },
+        "requires_agent_visual_review": True,
+        "requires_user_approval_for_organization": True,
+        "organizer_operations_created": False,
+    }
+    temp_manifest = manifest_path.with_name(manifest_path.stem + ".tmp" + manifest_path.suffix)
+    try:
+        temp_manifest.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_manifest, manifest_path)
+    finally:
+        if temp_manifest.exists():
+            temp_manifest.unlink()
+
+    return {
+        **manifest,
+        "workflow_manifest": str(manifest_path),
+        "classification_template_sha256": template["template_sha256"],
+        "next_step": (
+            "Review the composite and every non-background isolated preview, then complete "
+            "classification_work_template.json. Do not create organizer operations during classification."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -6737,7 +6867,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "create-psd-classification-template", "finalize-psd-classification-template", "validate-psd-classification", "create-organize-plan-draft"),
+        choices=("diagnose", "status", "lock-units", "exec-jsx", "compose-grid", "add-panel-labels", "add-scale-bar", "unify-fonts", "export-figure", "preflight-figure", "inspect-psd", "apply-organize-plan", "preview-psd-layers", "prepare-existing-psd", "create-psd-classification-template", "finalize-psd-classification-template", "validate-psd-classification", "create-organize-plan-draft"),
         default="diagnose",
         help="Bridge operation. Default: diagnose.",
     )
@@ -6819,6 +6949,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview-dir",
         type=Path,
         help="New output directory for --action preview-psd-layers.",
+    )
+    parser.add_argument(
+        "--workflow-dir",
+        type=Path,
+        help="New output directory for the complete --action prepare-existing-psd intake workflow.",
     )
     parser.add_argument(
         "--preview-node-key",
@@ -6956,6 +7091,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    if args.action == "prepare-existing-psd":
+        if args.input_psd is None or args.workflow_dir is None:
+            print(
+                "ERROR: --input-psd and --workflow-dir are required "
+                "for --action prepare-existing-psd.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.input_psd.is_file():
+            print("ERROR: input PSD does not exist: " + str(args.input_psd), file=sys.stderr)
+            return 2
+        if args.workflow_dir.exists():
+            print("ERROR: workflow directory already exists: " + str(args.workflow_dir), file=sys.stderr)
+            return 2
+
     if args.action == "inspect-psd":
         if args.input_psd is None:
             print(
@@ -7089,6 +7239,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "inspect-psd",
             "apply-organize-plan",
             "preview-psd-layers",
+            "prepare-existing-psd",
         }
         bridge = (
             PhotoshopBridge(execution_mode=args.execution_mode)
@@ -7158,6 +7309,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.input_psd,
                 args.preview_dir,
                 node_keys=args.preview_node_key,
+                max_previews=args.preview_max_layers,
+                thumbnail_width_px=args.preview_width_px,
+                bridge=bridge,
+            )
+        elif args.action == "prepare-existing-psd":
+            result = prepare_existing_psd(
+                args.input_psd,
+                args.workflow_dir,
                 max_previews=args.preview_max_layers,
                 thumbnail_width_px=args.preview_width_px,
                 bridge=bridge,
