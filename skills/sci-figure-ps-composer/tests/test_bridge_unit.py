@@ -1318,7 +1318,7 @@ class PreviewPsdLayersTests(unittest.TestCase):
         self.assertEqual(result["layer_tree_sha256"], inspection["layer_tree_sha256"])
         self.assertEqual(len(bridge.jsx_calls), 1)
         self.assertNotIn("SCI_PS_INSPECT_PSD", bridge.jsx_calls[0])
-        self.assertIn("SCI_PSD_PREVIEW", bridge.jsx_calls[0])
+        self.assertIn("SCI_PS_PREVIEW_PSD", bridge.jsx_calls[0])
 
     def test_preview_psd_layers_can_select_specific_node_keys(self):
         bridge = FakePreviewBridge()
