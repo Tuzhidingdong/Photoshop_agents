@@ -4813,7 +4813,7 @@ def prepare_existing_psd(
     thumbnail_width_px: int = 512,
     bridge: Optional[PhotoshopBridge] = None,
 ) -> Dict[str, Any]:
-    """Create one reusable inspection, full visual index, and review template for an existing PSD."""
+    """Create one reusable inspection and full visual index; include optional classification scaffolding."""
     source_file = Path(input_path).expanduser().resolve(strict=True)
     if not source_file.is_file() or source_file.suffix.lower() != ".psd":
         raise ValueError("input_path must be an existing PSD file.")
@@ -4912,9 +4912,14 @@ def prepare_existing_psd(
         **manifest,
         "workflow_manifest": str(manifest_path),
         "classification_template_sha256": template["template_sha256"],
+        "agent_workflow": "single_pass_semantic_review",
+        "classification_template_required": False,
         "next_step": (
-            "Review the composite and every non-background isolated preview, then complete "
-            "classification_work_template.json. Do not create organizer operations during classification."
+            "Review the composite, layer metadata, and isolated previews in one semantic pass. "
+            "Write one complete evidence-grounded classification JSON directly; "
+            "classification_work_template.json is optional scaffolding for unusually complex cases. "
+            "Then prepare one consolidated risk-assessed organizer-plan draft. Do not apply it "
+            "until the user approves the exact operations."
         ),
     }
 
