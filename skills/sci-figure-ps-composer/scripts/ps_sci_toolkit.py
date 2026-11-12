@@ -5520,10 +5520,11 @@ def apply_organize_plan(
     output_path: str | Path,
     *,
     approved: bool = False,
+    approved_visual_changes: bool = False,
     overwrite: bool = False,
     bridge: Optional[PhotoshopBridge] = None,
 ) -> Dict[str, Any]:
-    """Apply an explicitly approved, structure-only plan to a temporary copy of a PSD."""
+    """Apply an explicitly approved organizer plan to a temporary copy of a PSD."""
     if not approved:
         raise PermissionError(
             "Organizer plan has not been approved. Review it with the user and pass approved=True."
@@ -5545,6 +5546,22 @@ def apply_organize_plan(
         )
 
     loaded_plan = _load_organize_plan(plan)
+    planned_operations = loaded_plan.get("operations", [])
+    has_visibility_changes = (
+        isinstance(planned_operations, list)
+        and any(
+            isinstance(operation, dict)
+            and operation.get("action") == "set_visibility"
+            for operation in planned_operations
+        )
+    )
+    if has_visibility_changes and not approved_visual_changes:
+        raise PermissionError(
+            "Organizer plan contains visibility changes that directly alter the rendered figure. "
+            "Call them out explicitly, obtain the user's separate acknowledgement, and pass "
+            "approved_visual_changes=True (CLI: --confirm-visibility-changes)."
+        )
+
     source_hash_before = _sha256_file(source_file)
     active_bridge = bridge if bridge is not None else PhotoshopBridge()
 
@@ -6872,7 +6889,8 @@ def _assess_organize_plan_risk(
         approval_text = (
             "Show every visibility change in a separate, unmistakable section. "
             "The user must explicitly acknowledge those exact visibility changes; "
-            "a generic approval of 'organization' is insufficient."
+            "a generic approval of 'organization' is insufficient. The apply CLI additionally "
+            "requires --confirm-visibility-changes."
         )
     elif counts["high"]:
         approval_text = (
@@ -7130,7 +7148,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--confirm-plan",
         action="store_true",
-        help="Explicitly approve execution of the organizer plan on a temporary PSD copy.",
+        help="Explicitly approve the complete reviewed organizer plan on a temporary PSD copy.",
+    )
+    parser.add_argument(
+        "--confirm-visibility-changes",
+        action="store_true",
+        help=(
+            "Separately acknowledge the exact set_visibility operations in the reviewed plan. "
+            "Required only when the plan changes layer visibility."
+        ),
     )
     parser.add_argument(
         "--label-style",
@@ -7365,6 +7391,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        try:
+            plan_preview = json.loads(args.organize_plan.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print("ERROR: cannot read organizer plan: " + str(exc), file=sys.stderr)
+            return 2
+        plan_operations = plan_preview.get("operations", []) if isinstance(plan_preview, dict) else []
+        has_visibility_changes = (
+            isinstance(plan_operations, list)
+            and any(
+                isinstance(operation, dict)
+                and operation.get("action") == "set_visibility"
+                for operation in plan_operations
+            )
+        )
+        if has_visibility_changes and not args.confirm_visibility_changes:
+            print(
+                "ERROR: this plan changes rendered visibility. Review each exact visibility change "
+                "and pass --confirm-visibility-changes in addition to --confirm-plan.",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.action == "preflight-figure":
         if args.input_psd is None:
@@ -7521,6 +7568,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.organize_plan,
                 args.output,
                 approved=args.confirm_plan,
+                approved_visual_changes=args.confirm_visibility_changes,
                 overwrite=args.overwrite,
                 bridge=bridge,
             )
