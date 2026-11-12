@@ -286,6 +286,22 @@ Node keys are valid only for the inspected source hash and tree fingerprint. The
 
 The agent must explain the intended changes, including the exact layer paths and operations, then obtain explicit user approval. The plan is JSON:
 
+### Risk tiers and approval policy
+
+Every generated draft includes `risk_assessment`, with an overall risk level, operation counts, and a before/after review record for each operation. Use these levels when preparing the user-facing approval request:
+
+| Risk | Operations | Expected impact | Approval handling |
+|---|---|---|---|
+| **Low** | `create_group`, `rename_layer` | Changes names or empty grouping; no direct pixel/render change is expected. External name-based scripts may still depend on old names. | Batch into the consolidated plan review. |
+| **High** | `move_layer`, `reorder_layer` | Changes parent/group context or stacking order; blending, masks, adjustment behavior, occlusion, or the composite may change. | Call out each exact source and destination/order change and its possible visual consequence in the consolidated approval request. |
+| **Critical** | `set_visibility` | Directly changes which content contributes to the rendered figure. | List each exact visible/hidden transition in its own clearly marked section. The user's approval must explicitly acknowledge the visibility change, and execution requires the additional `--confirm-visibility-changes` switch. |
+
+A full-plan approval is always required. Low- and high-risk operations may be approved together after the complete list is shown. Critical visibility changes are never buried inside a generic “organize layers” request: obtain explicit acknowledgement of those exact transitions. If the user does not approve one of them, remove it from the operations array and regenerate the draft. Do not split one coherent plan into repeated confirmation prompts for each harmless rename.
+
+The organizer v1 allowlist is deliberately narrow. Delete, merge, flatten, rasterize, crop, resize, transform, and pixel-content edits are prohibited; do not translate a user request for those changes into an organizer operation. They require a separate workflow and explicit handling, not an automatic fallback.
+
+
+
 ~~~json
 {
   "schema_version": 1,
@@ -350,7 +366,7 @@ python scripts/ps_sci_toolkit.py --action apply-organize-plan `
   --execution-mode quiet
 ~~~
 
-The CLI requires `--confirm-plan`. The API requires `approved=True`. The executor copies the source PSD to a temporary working file, applies only the approved structural operations, saves to a temporary PSD in the output directory, reopens and verifies the edited structure, then atomically moves the verified file to the requested output path. The original PSD is never saved or overwritten. Existing output files are protected unless `--overwrite` is explicit.
+The CLI always requires `--confirm-plan`. If the plan contains any `set_visibility` operation, it additionally requires `--confirm-visibility-changes`; the API likewise requires both `approved=True` and `approved_visual_changes=True` for that case. This critical gate is checked before Photoshop is initialized or the PSD is inspected for application. The executor copies the source PSD to a temporary working file, applies only the approved structural operations, saves to a temporary PSD in the output directory, reopens and verifies the edited structure, then atomically moves the verified file to the requested output path. The original PSD is never saved or overwritten. Existing output files are protected unless `--overwrite` is explicit.
 
 Organizer v1 does not delete, merge, flatten, rasterize, resample, crop, transform, or alter pixel data. It cannot reconstruct independent layers from a flattened image. Clipping-mask moves are rejected because reparenting can change their rendering relationship. Unknown scientific meaning remains a human classification decision, not an automatic guess.
 
