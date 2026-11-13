@@ -34,7 +34,8 @@ Do not assume the python command resolves to the intended environment. Prefer th
 The toolkit is located at scripts/ps_sci_toolkit.py.
 
 ~~~powershell
-python scripts/ps_sci_toolkit.py --action diagnose
+python scripts/ps_sci_toolkit.py --action diagnose --connect-timeout 4
+python scripts/ps_sci_toolkit.py --action diagnose --json
 python scripts/ps_sci_toolkit.py --action status
 python scripts/ps_sci_toolkit.py --action lock-units
 python scripts/ps_sci_toolkit.py --action exec-jsx --jsx-file path\to\script.jsx
