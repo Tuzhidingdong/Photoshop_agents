@@ -283,6 +283,138 @@ def inspect_photoshop_processes(timeout_seconds: float = 5.0) -> dict[str, Any]:
         }
 
 
+def _get_active_comtypes_application() -> tuple[Any, str]:
+    """Attach to a running Photoshop instance through comtypes dynamic dispatch."""
+    if os.name != "nt":
+        raise OSError("comtypes COM automation is available only on Windows.")
+    comtypes = importlib.import_module("comtypes")
+    client = importlib.import_module("comtypes.client")
+    failures: list[str] = []
+    for progid in _photoshop_progids():
+        try:
+            return client.GetActiveObject(progid, dynamic=True), progid
+        except Exception as exc:
+            failures.append(f"{progid}: {type(exc).__name__}: {exc}")
+
+    try:
+        clsid_module = importlib.import_module("photoshop.api._clsid")
+        class_id = clsid_module.resolve_photoshop_class_id("Application")
+        if class_id:
+            return client.GetActiveObject(class_id, dynamic=True), "CLSID:" + str(class_id)
+    except Exception as exc:
+        failures.append(f"Application CLSID: {type(exc).__name__}: {exc}")
+
+    raise RuntimeError(
+        "comtypes could not attach to a running Photoshop Application object. "
+        + " | ".join(failures[-5:])
+    )
+
+
+def _comtypes_probe_worker(connection) -> None:
+    """Run a comtypes active-object probe in a killable child process."""
+    initialized = False
+    try:
+        comtypes = importlib.import_module("comtypes")
+        comtypes.CoInitialize()
+        initialized = True
+        app, identifier = _get_active_comtypes_application()
+        value = app.doJavaScript(
+            'String(app.version) + String.fromCharCode(9) + String(app.documents.length);'
+        )
+        fields = str(value).split(chr(9), 1)
+        connection.send({
+            "ok": True,
+            "identifier": identifier,
+            "photoshop_version": fields[0],
+            "open_document_count": int(fields[1]) if len(fields) > 1 else None,
+        })
+    except BaseException as exc:
+        try:
+            connection.send({
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            })
+        except Exception:
+            pass
+    finally:
+        if initialized:
+            try:
+                comtypes.CoUninitialize()
+            except Exception:
+                pass
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def probe_comtypes(timeout_seconds: float = 8.0) -> dict[str, Any]:
+    """Probe comtypes.GetActiveObject without activating a new Photoshop server."""
+    started = time.perf_counter()
+    if os.name != "nt":
+        return {
+            "ok": False,
+            "timed_out": False,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "error_type": "UnsupportedPlatform",
+            "error": "Photoshop COM automation is supported on Windows only.",
+        }
+    try:
+        import multiprocessing
+        context = multiprocessing.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(target=_comtypes_probe_worker, args=(sender,), daemon=True)
+        process.start()
+        sender.close()
+        if receiver.poll(max(0.1, float(timeout_seconds))):
+            try:
+                result = receiver.recv()
+            except EOFError:
+                result = {
+                    "ok": False,
+                    "timed_out": False,
+                    "error_type": "ProbeProcessExited",
+                    "error": "The comtypes probe exited without returning a result.",
+                }
+            process.join(timeout=0.5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
+        else:
+            process.terminate()
+            process.join(timeout=1.0)
+            result = {
+                "ok": False,
+                "timed_out": True,
+                "error_type": "ConnectionTimeout",
+                "error": f"comtypes probe exceeded {timeout_seconds:.1f} seconds; only the probe process was terminated.",
+            }
+        receiver.close()
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "timed_out": False,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+    result.setdefault("timed_out", False)
+    result["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    return result
+
+
+def connect_comtypes_application(identifier: str | None = None) -> tuple[Any, str]:
+    """Attach in this process to the exact active object validated by probe_comtypes."""
+    comtypes = importlib.import_module("comtypes")
+    client = importlib.import_module("comtypes.client")
+    comtypes.CoInitialize()
+    if identifier and identifier.startswith("CLSID:"):
+        identifier = identifier[len("CLSID:"):]
+    if identifier:
+        return client.GetActiveObject(identifier, dynamic=True), identifier
+    return _get_active_comtypes_application()
+
+
 def inspect_comtypes_cache() -> dict[str, Any]:
     """Report the generated-cache directory without deleting or modifying it."""
     try:
