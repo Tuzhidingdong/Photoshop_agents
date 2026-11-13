@@ -2510,6 +2510,11 @@ class PreflightFigureUnitTests(unittest.TestCase):
 
 
 
+class PhotoshopConnectionUnitTests(unittest.TestCase):
+    def test_injected_application_records_backend(self):
+        bridge = PhotoshopBridge(app=FakePhotoshopApplication())
+        self.assertEqual(bridge.backend, "injected")
+        self.assertTrue(bridge.connection_report["injected"])
 
 
 if __name__ == "__main__":
