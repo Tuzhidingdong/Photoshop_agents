@@ -181,7 +181,7 @@ class PhotoshopBridge:
                 app, progid = connect_win32com_application()
                 report = {
                     "selected_backend": "win32com",
-                    "selected_progid": progid,
+                    "selected_com_identifier": progid,
                     "attempts": attempts,
                 }
                 return app, "win32com", report
