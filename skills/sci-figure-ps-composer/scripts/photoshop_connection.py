@@ -49,9 +49,21 @@ def _get_active_win32com_application() -> tuple[Any, str]:
             return dynamic.Dispatch(raw_dispatch), progid
         except Exception as exc:
             failures.append(f"{progid}: {type(exc).__name__}: {exc}")
+    # photoshop-python-api 0.25.0 exposes a CLSID resolver for installations
+    # that do not publish versioned ProgIDs. Reuse that resolver, but still attach
+    # through GetActiveObject so this path cannot activate a new Photoshop process.
+    try:
+        clsid_module = importlib.import_module("photoshop.api._clsid")
+        class_id = clsid_module.resolve_photoshop_class_id("Application")
+        if class_id:
+            raw_dispatch = pythoncom.GetActiveObject(class_id)
+            return dynamic.Dispatch(raw_dispatch), "CLSID:" + str(class_id)
+    except Exception as exc:
+        failures.append(f"Application CLSID: {type(exc).__name__}: {exc}")
+
     raise RuntimeError(
-        "No running Photoshop COM object was found through the registered Application ProgIDs. "
-        + " | ".join(failures[-4:])
+        "No running Photoshop COM object was found through Application ProgIDs or CLSID. "
+        + " | ".join(failures[-5:])
     )
 
 
