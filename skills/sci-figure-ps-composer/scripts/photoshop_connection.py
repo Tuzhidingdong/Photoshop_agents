@@ -35,6 +35,24 @@ def _photoshop_progids() -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def _application_clsid_from_type_library() -> str | None:
+    """Read the Photoshop Application CLSID from installed type libraries only.
+
+    Deliberately avoids the package resolver's last-resort CoCreateInstance scan,
+    which may instantiate local-server classes while discovering coclass names.
+    """
+    try:
+        clsid_module = importlib.import_module("photoshop.api._clsid")
+        libraries = clsid_module._get_type_library_coclasses()
+        for coclasses in libraries:
+            class_id = coclasses.get("Application")
+            if class_id:
+                return str(class_id)
+    except Exception:
+        return None
+    return None
+
+
 def _get_active_win32com_application(identifier: str | None = None) -> tuple[Any, str]:
     """Attach to an already-running instance using late-bound COM; never activate one."""
     if os.name != "nt":
@@ -60,14 +78,15 @@ def _get_active_win32com_application(identifier: str | None = None) -> tuple[Any
     # photoshop-python-api 0.25.0 exposes a CLSID resolver for installations
     # that do not publish versioned ProgIDs. Reuse that resolver, but still attach
     # through GetActiveObject so this path cannot activate a new Photoshop process.
-    try:
-        clsid_module = importlib.import_module("photoshop.api._clsid")
-        class_id = clsid_module.resolve_photoshop_class_id("Application")
-        if class_id:
+    class_id = _application_clsid_from_type_library()
+    if class_id:
+        try:
             raw_dispatch = pythoncom.GetActiveObject(class_id)
             return dynamic.Dispatch(raw_dispatch), "CLSID:" + str(class_id)
-    except Exception as exc:
-        failures.append(f"Application CLSID: {type(exc).__name__}: {exc}")
+        except Exception as exc:
+            failures.append(f"Application CLSID: {type(exc).__name__}: {exc}")
+    else:
+        failures.append("Application CLSID: not found in installed Photoshop type libraries.")
 
     raise RuntimeError(
         "No running Photoshop COM object was found through Application ProgIDs or CLSID. "
@@ -242,13 +261,14 @@ def _get_active_comtypes_application() -> tuple[Any, str]:
         except Exception as exc:
             failures.append(f"{progid}: {type(exc).__name__}: {exc}")
 
-    try:
-        clsid_module = importlib.import_module("photoshop.api._clsid")
-        class_id = clsid_module.resolve_photoshop_class_id("Application")
-        if class_id:
+    class_id = _application_clsid_from_type_library()
+    if class_id:
+        try:
             return client.GetActiveObject(class_id, dynamic=True), "CLSID:" + str(class_id)
-    except Exception as exc:
-        failures.append(f"Application CLSID: {type(exc).__name__}: {exc}")
+        except Exception as exc:
+            failures.append(f"Application CLSID: {type(exc).__name__}: {exc}")
+    else:
+        failures.append("Application CLSID: not found in installed Photoshop type libraries.")
 
     raise RuntimeError(
         "comtypes could not attach to a running Photoshop Application object. "
