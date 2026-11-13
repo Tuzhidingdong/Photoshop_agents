@@ -178,10 +178,11 @@ class PhotoshopBridge:
         attempts.append({"backend": "win32com", "probe": native_probe})
         if native_probe.get("ok"):
             try:
-                app, progid = connect_win32com_application()
+                identifier = native_probe.get("identifier")
+                app, com_identifier = connect_win32com_application(identifier)
                 report = {
                     "selected_backend": "win32com",
-                    "selected_com_identifier": progid,
+                    "selected_com_identifier": com_identifier,
                     "attempts": attempts,
                 }
                 return app, "win32com", report
