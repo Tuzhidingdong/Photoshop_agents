@@ -63,8 +63,8 @@ def _win32com_probe_worker(connection) -> None:
         pythoncom.CoInitialize()
         initialized = True
         app, progid = _get_active_win32com_application()
-        value = app.doJavaScript('String(app.version) + "\\t" + String(app.documents.length);')
-        fields = str(value).split("\\t", 1)
+        value = app.doJavaScript('String(app.version) + String.fromCharCode(9) + String(app.documents.length);')
+        fields = str(value).split(chr(9), 1)
         connection.send({
             "ok": True,
             "progid": progid,
@@ -152,8 +152,8 @@ def probe_photoshop_python_api(timeout_seconds: float = 8.0) -> dict[str, Any]:
         "try:\n"
         " import photoshop.api as api\n"
         " app=api.Application()\n"
-        " value=app.doJavaScript('String(app.version) + \"\\\\t\" + String(app.documents.length);')\n"
-        " fields=str(value).split('\\\\t',1)\n"
+        " value=app.doJavaScript('String(app.version) + String.fromCharCode(9) + String(app.documents.length);')\n"
+        " fields=str(value).split(chr(9),1)\n"
         " result={'ok':True,'photoshop_version':fields[0],"
         "'open_document_count':int(fields[1]) if len(fields)>1 else None}\n"
         "except BaseException as exc:\n"
