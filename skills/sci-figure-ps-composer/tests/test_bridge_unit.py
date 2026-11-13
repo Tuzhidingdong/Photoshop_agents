@@ -1191,10 +1191,6 @@ class PreflightFigureUnitTests(unittest.TestCase):
 
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PhotoshopConnectionUnitTests(unittest.TestCase):
     def test_injected_application_records_backend(self):
         bridge = PhotoshopBridge(app=FakePhotoshopApplication())
@@ -1218,3 +1214,7 @@ class PhotoshopConnectionUnitTests(unittest.TestCase):
 
         bridge.execute_jsx("app.version;")
         self.assertEqual(app.calls, ["app.version;"])
+
+
+if __name__ == "__main__":
+    unittest.main()
