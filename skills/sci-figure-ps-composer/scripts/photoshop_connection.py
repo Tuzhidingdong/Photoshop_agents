@@ -224,7 +224,7 @@ def inspect_photoshop_processes(timeout_seconds: float = 5.0) -> dict[str, Any]:
         return {"available": False, "processes": [], "error": "Windows process inspection is unavailable."}
     powershell = (
         "$p = Get-CimInstance Win32_Process -Filter \"Name='Photoshop.exe'\" | "
-        "Select-Object ProcessId,ExecutablePath,CommandLine; "
+        "Select-Object ProcessId,ExecutablePath; "
         "if ($null -eq $p) { '[]' } else { ConvertTo-Json -InputObject @($p) -Compress }"
     )
     try:
