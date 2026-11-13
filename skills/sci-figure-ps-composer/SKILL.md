@@ -151,6 +151,8 @@ The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups
 
 COM probes run in child processes with hard timeouts; only the probe child process may be terminated. The Photoshop process is never terminated by recovery. The comtypes cache is inspected read-only: its presence alone is not treated as corruption and it is never deleted automatically.
 
+The dual-backend COM recovery layer has passed the repository's unit-test workflow on GitHub Actions. It has not yet been verified against the target Windows Photoshop 2026 installation. Run `--action diagnose` on that machine before treating the new connection path as real-machine verified.
+
 The unit lock intentionally changes Photoshop's global preferences and leaves them set to Pixels and Points. It does not create, close, or modify a document.
 
 ### Execution modes
