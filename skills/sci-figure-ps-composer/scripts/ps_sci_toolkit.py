@@ -20,6 +20,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import unquote
 
+from photoshop_connection import (
+    connect_win32com_application,
+    inspect_comtypes_cache,
+    inspect_photoshop_processes,
+    probe_photoshop_python_api,
+    probe_win32com,
+)
+
 
 PROTOCOL_PREFIX = "SCI_PS_"
 
@@ -119,11 +127,36 @@ def _parse_protocol(
 class PhotoshopBridge:
     """Thin, synchronous bridge to a running desktop Photoshop instance."""
 
-    def __init__(self, app: Any = None) -> None:
-        self.app = app if app is not None else self._connect_application()
+    def __init__(
+        self,
+        app: Any = None,
+        *,
+        backend: Optional[str] = None,
+        connect_timeout: float = 4.0,
+    ) -> None:
+        self.silent_dialogs = False
+        self.connect_timeout = max(0.5, float(connect_timeout))
+        if app is not None:
+            self.app = app
+            self.backend = backend or "injected"
+            self.connection_report: Dict[str, Any] = {
+                "selected_backend": self.backend,
+                "injected": True,
+                "attempts": [],
+            }
+        else:
+            self.app, self.backend, self.connection_report = self._connect_application(
+                timeout_seconds=self.connect_timeout
+            )
 
     @staticmethod
-    def _connect_application() -> Any:
+    def _connect_application(*, timeout_seconds: float = 4.0) -> tuple[Any, str, Dict[str, Any]]:
+        """Attach to the running Photoshop instance using bounded backend probes.
+
+        Win32COM is checked first in an isolated process and used with late-bound
+        dispatch when healthy. photoshop-python-api remains a boundedly-probed
+        fallback. Probes never terminate Photoshop or modify a document.
+        """
         if os.name != "nt":
             raise PhotoshopBridgeError(
                 "connect",
@@ -131,26 +164,63 @@ class PhotoshopBridge:
                 exception_type="UnsupportedPlatform",
             )
 
-        try:
-            import photoshop.api as photoshop_api
-        except Exception as exc:
-            raise PhotoshopBridgeError(
-                "connect",
-                "Could not import photoshop.api. Install photoshop-python-api "
-                "into this Python interpreter. Original error: " + str(exc),
-                exception_type=type(exc).__name__,
-            ) from exc
+        attempts: list[Dict[str, Any]] = []
+        native_probe = probe_win32com(timeout_seconds=timeout_seconds)
+        attempts.append({"backend": "win32com", "probe": native_probe})
+        if native_probe.get("ok"):
+            try:
+                app, progid = connect_win32com_application()
+                report = {
+                    "selected_backend": "win32com",
+                    "selected_progid": progid,
+                    "attempts": attempts,
+                }
+                return app, "win32com", report
+            except Exception as exc:
+                attempts.append({
+                    "backend": "win32com_attach",
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                })
 
-        try:
-            return photoshop_api.Application()
-        except Exception as exc:
-            raise PhotoshopBridgeError(
-                "connect",
-                "Could not connect to Photoshop through COM. Start desktop "
-                "Photoshop, verify its COM registration, and retry. Original "
-                "error: " + str(exc),
-                exception_type=type(exc).__name__,
-            ) from exc
+        # Test the alternate API in a killable subprocess before importing it in
+        # this process. This prevents a stalled COM activation from freezing the Agent.
+        api_probe = probe_photoshop_python_api(timeout_seconds=max(6.0, timeout_seconds * 2))
+        attempts.append({"backend": "photoshop-python-api", "probe": api_probe})
+        if api_probe.get("ok"):
+            try:
+                import photoshop.api as photoshop_api
+
+                app = photoshop_api.Application()
+                report = {
+                    "selected_backend": "photoshop-python-api",
+                    "attempts": attempts,
+                }
+                return app, "photoshop-python-api", report
+            except Exception as exc:
+                attempts.append({
+                    "backend": "photoshop-python-api_attach",
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                })
+
+        timed_out = any(
+            item.get("probe", {}).get("timed_out")
+            for item in attempts
+            if isinstance(item, dict)
+        )
+        message = (
+            "Neither COM backend could attach to the running Photoshop instance. "
+            "No Photoshop process was terminated and no comtypes cache was deleted. "
+            + json.dumps(attempts, ensure_ascii=False)
+        )
+        raise PhotoshopBridgeError(
+            "connect",
+            message,
+            exception_type="ConnectionTimeout" if timed_out else "ConnectionBackendUnavailable",
+        )
 
     def execute_jsx(self, jsx: str) -> str:
         """Execute ExtendScript through Application.doJavaScript()."""
@@ -161,8 +231,19 @@ class PhotoshopBridge:
                 exception_type="InvalidJSXInput",
             )
 
+        payload = jsx
+        if self.silent_dialogs:
+            # Suppress dialogs only during this JSX call and restore the user's
+            # previous Photoshop setting even when the JSX script raises.
+            payload = (
+                "(function(){var __sciPreviousDialogs=app.displayDialogs;"
+                "app.displayDialogs=DialogModes.NO;"
+                "try{return eval(" + json.dumps(jsx) + ");}"
+                "finally{app.displayDialogs=__sciPreviousDialogs;}})();"
+            )
+
         try:
-            result = self.app.doJavaScript(jsx)
+            result = self.app.doJavaScript(payload)
         except Exception as exc:
             raise PhotoshopBridgeError(
                 "execute_jsx",
@@ -324,11 +405,27 @@ class PhotoshopBridge:
 
     def diagnose(self) -> Dict[str, Any]:
         """Run non-destructive Photoshop/JSX diagnostics and return a report."""
+        process_report = inspect_photoshop_processes()
+        api_probe = probe_photoshop_python_api(timeout_seconds=max(6.0, self.connect_timeout * 2))
         report: Dict[str, Any] = {
             "python_executable": sys.executable,
             "python_version": platform.python_version(),
             "photoshop_python_api_version": _package_version("photoshop-python-api"),
             "comtypes_version": _package_version("comtypes"),
+            "connection_backend": self.backend,
+            "connection_report": self.connection_report,
+            "photoshop_processes": process_report,
+            "multiple_photoshop_processes": len(process_report.get("processes", [])) > 1,
+            "win32com_probe": next(
+                (
+                    item.get("probe")
+                    for item in self.connection_report.get("attempts", [])
+                    if item.get("backend") == "win32com"
+                ),
+                None,
+            ),
+            "photoshop_python_api_probe": api_probe,
+            "comtypes_cache": inspect_comtypes_cache(),
             "photoshop": None,
             "unit_lock": None,
             "jsx_exception_capture": None,
@@ -3763,6 +3860,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bridge operation. Default: diagnose.",
     )
     parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=4.0,
+        help="Maximum seconds for the isolated Win32COM probe (default: 4).",
+    )
+    parser.add_argument(
+        "--silent-dialogs",
+        action="store_true",
+        help="Suppress Photoshop dialogs for each JSX call and restore the prior setting afterward.",
+    )
+    parser.add_argument(
         "--jsx-file",
         type=Path,
         help="JSX file to execute when --action exec-jsx is selected.",
@@ -3945,7 +4053,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
     try:
-        bridge = PhotoshopBridge()
+        bridge = PhotoshopBridge(connect_timeout=args.connect_timeout)
+        bridge.silent_dialogs = args.silent_dialogs
 
         if args.action == "diagnose":
             result = bridge.diagnose()
