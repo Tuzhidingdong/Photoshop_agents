@@ -21,10 +21,11 @@ from typing import Any, Dict, Optional
 from urllib.parse import unquote
 
 from photoshop_connection import (
+    connect_comtypes_application,
     connect_win32com_application,
     inspect_comtypes_cache,
     inspect_photoshop_processes,
-    probe_photoshop_python_api,
+    probe_comtypes,
     probe_win32com,
 )
 
@@ -194,34 +195,31 @@ class PhotoshopBridge:
                     "error": str(exc),
                 })
 
-        # Do not fall back to CreateObject unless a running Photoshop.exe was
-        # positively observed; COM activation can otherwise start a new instance.
+        # Both backends must attach to the Running Object Table. Do not use
+        # CreateObject here: it may launch another Photoshop process.
         if not process_report.get("processes"):
             raise PhotoshopBridgeError(
                 "connect",
                 "Win32COM could not attach and no running Photoshop.exe could be verified. "
-                "The python-api fallback was not attempted because it may activate a new Photoshop process. "
+                "The comtypes fallback was not attempted because there is no confirmed running instance. "
                 + json.dumps(attempts, ensure_ascii=False),
                 exception_type="PhotoshopNotRunningOrUnverified",
             )
 
-        # Test the alternate API in a killable subprocess before importing it in
-        # this process. This bounds a stalled COM activation to the probe worker.
-        api_probe = probe_photoshop_python_api(timeout_seconds=max(6.0, timeout_seconds * 2))
-        attempts.append({"backend": "photoshop-python-api", "probe": api_probe})
-        if api_probe.get("ok"):
+        comtypes_probe = probe_comtypes(timeout_seconds=max(6.0, timeout_seconds * 2))
+        attempts.append({"backend": "comtypes", "probe": comtypes_probe})
+        if comtypes_probe.get("ok"):
             try:
-                import photoshop.api as photoshop_api
-
-                app = photoshop_api.Application()
+                app, identifier = connect_comtypes_application(comtypes_probe.get("identifier"))
                 report = {
-                    "selected_backend": "photoshop-python-api",
+                    "selected_backend": "comtypes",
+                    "selected_com_identifier": identifier,
                     "attempts": attempts,
                 }
-                return app, "photoshop-python-api", report
+                return app, "comtypes", report
             except Exception as exc:
                 attempts.append({
-                    "backend": "photoshop-python-api_attach",
+                    "backend": "comtypes_attach",
                     "ok": False,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
@@ -427,7 +425,14 @@ class PhotoshopBridge:
     def diagnose(self) -> Dict[str, Any]:
         """Run non-destructive Photoshop/JSX diagnostics and return a report."""
         process_report = inspect_photoshop_processes()
-        api_probe = probe_photoshop_python_api(timeout_seconds=max(6.0, self.connect_timeout * 2))
+        comtypes_probe_result = next(
+            (
+                item.get("probe")
+                for item in self.connection_report.get("attempts", [])
+                if item.get("backend") == "comtypes"
+            ),
+            None,
+        )
         report: Dict[str, Any] = {
             "python_executable": sys.executable,
             "python_version": platform.python_version(),
@@ -445,7 +450,7 @@ class PhotoshopBridge:
                 ),
                 None,
             ),
-            "photoshop_python_api_probe": api_probe,
+            "comtypes_probe": comtypes_probe_result,
             "comtypes_cache": inspect_comtypes_cache(),
             "photoshop": None,
             "unit_lock": None,
