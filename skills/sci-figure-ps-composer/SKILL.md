@@ -16,8 +16,9 @@ The implementation is staged and all seven stages have passed real-machine verif
 - Windows desktop session.
 - Adobe Photoshop installed. The Photoshop process should be started before running the bridge.
 - Python 3.10 or later; the validated user environment is Python 3.13.9.
-- photoshop-python-api 0.24.2 or a compatible 0.24.x release.
+- photoshop-python-api 0.25.0 (pinned while the dual-backend connection path is validated).
 - COM support through the package's comtypes dependency.
+- pywin32 on Windows for the isolated Win32COM probe and dynamic fallback backend.
 - Pillow 10 or later, used only to read source raster dimensions; it does not re-encode or modify original images.
 
 Install the dependency into the exact Python interpreter that will run the skill:
@@ -33,7 +34,8 @@ Do not assume the python command resolves to the intended environment. Prefer th
 The toolkit is located at scripts/ps_sci_toolkit.py.
 
 ~~~powershell
-python scripts/ps_sci_toolkit.py --action diagnose
+python scripts/ps_sci_toolkit.py --action diagnose --connect-timeout 4
+python scripts/ps_sci_toolkit.py --action diagnose --json
 python scripts/ps_sci_toolkit.py --action status
 python scripts/ps_sci_toolkit.py --action lock-units
 python scripts/ps_sci_toolkit.py --action exec-jsx --jsx-file path\to\script.jsx
@@ -138,23 +140,30 @@ The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups
 
 ### Bridge behavior
 
-1. Import photoshop.api and create photoshop.api.Application().
-2. Execute JSX through the package's Application.doJavaScript() method.
-3. Normalize Python/COM/JSX failures as PhotoshopBridgeError, preserving the operation stage, exception type, message, and a short JSX preview.
-4. Lock app.preferences.rulerUnits to Units.PIXELS.
-5. Lock app.preferences.typeUnits to TypeUnits.POINTS.
-6. Verify both preferences by reading them back from Photoshop.
+1. Run a bounded Win32COM probe in a separate process using GetActiveObject; the probe attaches to an already-running Photoshop instance and never launches or terminates Photoshop.
+2. When the Win32COM probe succeeds, attach with late-bound dynamic dispatch. If unavailable, probe `comtypes.client.GetActiveObject(dynamic=True)` in a killable subprocess, then attach to the exact active object identifier returned by the probe.
+3. Record the selected backend, both probe results, Photoshop process metadata, and a read-only comtypes cache inventory.
+4. Execute JSX through the selected backend's doJavaScript() method. Both backends use the same native Photoshop JSX execution path.
+5. Normalize Python/COM/JSX failures as PhotoshopBridgeError, preserving the operation stage, exception type, message, and a short JSX preview.
+6. Lock app.preferences.rulerUnits to Units.PIXELS.
+7. Lock app.preferences.typeUnits to TypeUnits.POINTS.
+8. Verify both preferences by reading them back from Photoshop.
 
 The unit lock intentionally changes Photoshop's global preferences and leaves them set to Pixels and Points. It does not create, close, or modify a document.
+
+The process list does not use an empty main-window title as a health signal. Both COM backends use Running Object Table attachment (`GetActiveObject`) rather than `CreateObject`, so connection recovery does not intentionally launch another Photoshop instance. Multiple Photoshop processes produce a warning only; the toolkit never terminates a Photoshop process automatically. The comtypes cache is inspected read-only: the presence of generated files does not prove corruption and does not trigger deletion.
+
+Use --connect-timeout to adjust the isolated Win32COM probe timeout. Use --silent-dialogs only for unattended tasks: each JSX call temporarily sets app.displayDialogs to DialogModes.NO and restores the previous value in a finally block. It is not enabled by default.
 
 ## Agent workflow
 
 ### Before any document operation
 
 - Confirm the user is on Windows and identify the exact Python interpreter.
-- Confirm Photoshop is running. Do not launch or terminate Photoshop automatically.
+- Confirm Photoshop is running. Connection probes attach to an existing instance only; do not launch or terminate Photoshop automatically.
 - Run --action diagnose and inspect its structured result.
-- If COM connection fails, stop before attempting document changes. Report the stage and original error.
+- If both connection backends fail or the isolated probe times out, stop before attempting document changes. Report both probe results and original errors.
+- If one backend succeeds, continue through that backend and report its name.
 - If JSX execution works but unit verification fails, stop and report the observed values; do not silently proceed with geometry calculations.
 - Never claim real Photoshop integration passed based only on mocked tests.
 
@@ -164,6 +173,7 @@ The unit lock intentionally changes Photoshop's global preferences and leaves th
 - Keep JSX payloads self-contained and return a machine-readable result. The current bridge uses tab-delimited protocol markers to avoid dependence on newer JavaScript features in ExtendScript.
 - Catch errors inside JSX when a controlled result is required; include the error name, message, and line when available.
 - Allow Python to catch COM exceptions from doJavaScript() and wrap them in PhotoshopBridgeError.
+- Batch logically related operations into one JSX call when practical; this reduces COM round trips without changing Photoshop's native document engine.
 - Do not use browser APIs, Node APIs, or modern JavaScript syntax unsupported by ExtendScript.
 - Escape all user-provided strings before embedding them in JSX. Never concatenate untrusted file paths or labels without encoding.
 
@@ -394,7 +404,7 @@ A bridge diagnostic pass requires COM connection, JSX execution, successful unit
 
 ## Confirmed environment baseline
 
-The initial real-machine test for this skill reported:
+The historical real-machine baseline (before the dual-backend update) was:
 
 - Python 3.13.9 at D:\Software\Anacoda\python.exe.
 - photoshop-python-api 0.24.2.
@@ -404,5 +414,7 @@ The initial real-machine test for this skill reported:
 - Ruler units verified as Units.PIXELS.
 - Type units verified as TypeUnits.POINTS.
 - A deliberately raised and caught ExtendScript exception returned its marker correctly.
+
+The dual-backend implementation must be re-verified on this machine. Unit tests and CI do not replace a real Photoshop diagnostic run.
 
 The Stage 7 read-only publication preflight was also executed successfully on this installation against the Stage 5 editable PSD and Stage 6 export bundle; its required checks passed and the source PSD hash remained unchanged. This baseline is specific to the tested Windows machine. Re-run diagnostics after changing Photoshop, Python, or the package version.

@@ -1191,5 +1191,30 @@ class PreflightFigureUnitTests(unittest.TestCase):
 
 
 
+class PhotoshopConnectionUnitTests(unittest.TestCase):
+    def test_injected_application_records_backend(self):
+        bridge = PhotoshopBridge(app=FakePhotoshopApplication())
+        self.assertEqual(bridge.backend, "injected")
+        self.assertTrue(bridge.connection_report["injected"])
+
+    def test_silent_dialog_mode_wraps_jsx_and_restores_previous_setting(self):
+        app = FakePhotoshopApplication(["result"])
+        bridge = PhotoshopBridge(app=app)
+        bridge.silent_dialogs = True
+
+        self.assertEqual(bridge.execute_jsx("(function(){return 'result';})();"), "result")
+        payload = app.calls[0]
+        self.assertIn("app.displayDialogs=DialogModes.NO", payload)
+        self.assertIn("finally{app.displayDialogs=__sciPreviousDialogs;}", payload)
+        self.assertIn("return eval(", payload)
+
+    def test_silent_dialog_mode_is_opt_in(self):
+        app = FakePhotoshopApplication(["result"])
+        bridge = PhotoshopBridge(app=app)
+
+        bridge.execute_jsx("app.version;")
+        self.assertEqual(app.calls, ["app.version;"])
+
+
 if __name__ == "__main__":
     unittest.main()
