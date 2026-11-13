@@ -7,7 +7,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from photoshop_connection import parse_tasklist_csv, probe_win32com
+from photoshop_connection import parse_tasklist_csv, probe_comtypes, probe_win32com
 
 
 class PhotoshopConnectionHelpersTests(unittest.TestCase):
@@ -24,6 +24,12 @@ class PhotoshopConnectionHelpersTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform != "win32", "This test expects the non-Windows guard.")
     def test_non_windows_probe_returns_unsupported_without_importing_com(self):
         result = probe_win32com()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "UnsupportedPlatform")
+
+    @unittest.skipUnless(sys.platform != "win32", "This test expects the non-Windows guard.")
+    def test_non_windows_comtypes_probe_returns_unsupported(self):
+        result = probe_comtypes()
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_type"], "UnsupportedPlatform")
 
