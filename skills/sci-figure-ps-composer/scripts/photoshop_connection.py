@@ -139,6 +139,8 @@ def probe_win32com(timeout_seconds: float = 4.0) -> dict[str, Any]:
 
 def connect_win32com_application() -> tuple[Any, str]:
     """Return a late-bound dispatch to an already-running Photoshop instance."""
+    pythoncom = importlib.import_module("pythoncom")
+    pythoncom.CoInitialize()
     return _get_active_win32com_application()
 
 
