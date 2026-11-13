@@ -165,6 +165,15 @@ class PhotoshopBridge:
             )
 
         attempts: list[Dict[str, Any]] = []
+        process_report = inspect_photoshop_processes()
+        attempts.append({"backend": "process_inspection", "result": process_report})
+        if process_report.get("available") and not process_report.get("processes"):
+            raise PhotoshopBridgeError(
+                "connect",
+                "Photoshop.exe is not running. The bridge only attaches to an existing desktop instance and will not launch it.",
+                exception_type="PhotoshopNotRunning",
+            )
+
         native_probe = probe_win32com(timeout_seconds=timeout_seconds)
         attempts.append({"backend": "win32com", "probe": native_probe})
         if native_probe.get("ok"):
@@ -184,8 +193,19 @@ class PhotoshopBridge:
                     "error": str(exc),
                 })
 
+        # Do not fall back to CreateObject unless a running Photoshop.exe was
+        # positively observed; COM activation can otherwise start a new instance.
+        if not process_report.get("processes"):
+            raise PhotoshopBridgeError(
+                "connect",
+                "Win32COM could not attach and no running Photoshop.exe could be verified. "
+                "The python-api fallback was not attempted because it may activate a new Photoshop process. "
+                + json.dumps(attempts, ensure_ascii=False),
+                exception_type="PhotoshopNotRunningOrUnverified",
+            )
+
         # Test the alternate API in a killable subprocess before importing it in
-        # this process. This prevents a stalled COM activation from freezing the Agent.
+        # this process. This bounds a stalled COM activation to the probe worker.
         api_probe = probe_photoshop_python_api(timeout_seconds=max(6.0, timeout_seconds * 2))
         attempts.append({"backend": "photoshop-python-api", "probe": api_probe})
         if api_probe.get("ok"):
