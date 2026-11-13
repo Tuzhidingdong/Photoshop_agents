@@ -3850,6 +3850,13 @@ def _print_human_report(action: str, result: Dict[str, Any]) -> None:
         print("Python version: " + str(result.get("python_version")))
         print("photoshop-python-api: " + str(result.get("photoshop_python_api_version")))
         print("comtypes: " + str(result.get("comtypes_version")))
+        print("Selected backend: " + str(result.get("connection_backend")))
+        process_report = result.get("photoshop_processes") or {}
+        print("Photoshop process count: " + str(len(process_report.get("processes", []))))
+        print("Multiple Photoshop processes: " + str(result.get("multiple_photoshop_processes")))
+        api_probe = result.get("photoshop_python_api_probe") or {}
+        print("Python API isolated probe: " + str(api_probe.get("ok")))
+        print("comtypes cache: " + str((result.get("comtypes_cache") or {}).get("status")))
 
         photoshop = result.get("photoshop") or {}
         print("COM connection: " + str(photoshop.get("connected", False)))
