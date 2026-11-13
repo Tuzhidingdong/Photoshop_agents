@@ -3860,8 +3860,8 @@ def _print_human_report(action: str, result: Dict[str, Any]) -> None:
         process_report = result.get("photoshop_processes") or {}
         print("Photoshop process count: " + str(len(process_report.get("processes", []))))
         print("Multiple Photoshop processes: " + str(result.get("multiple_photoshop_processes")))
-        api_probe = result.get("photoshop_python_api_probe") or {}
-        print("Python API isolated probe: " + str(api_probe.get("ok")))
+        comtypes_probe_result = result.get("comtypes_probe") or {}
+        print("comtypes active-object probe: " + str(comtypes_probe_result.get("ok")))
         print("comtypes cache: " + str((result.get("comtypes_cache") or {}).get("status")))
 
         photoshop = result.get("photoshop") or {}
