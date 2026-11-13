@@ -164,60 +164,6 @@ def connect_win32com_application(identifier: str | None = None) -> tuple[Any, st
     return _get_active_win32com_application(identifier)
 
 
-def probe_photoshop_python_api(timeout_seconds: float = 8.0) -> dict[str, Any]:
-    """Test photoshop-python-api in an isolated process with a hard timeout."""
-    started = time.perf_counter()
-    script = (
-        "import json\n"
-        "try:\n"
-        " import photoshop.api as api\n"
-        " app=api.Application()\n"
-        " value=app.doJavaScript('String(app.version) + String.fromCharCode(9) + String(app.documents.length);')\n"
-        " fields=str(value).split(chr(9),1)\n"
-        " result={'ok':True,'photoshop_version':fields[0],"
-        "'open_document_count':int(fields[1]) if len(fields)>1 else None}\n"
-        "except BaseException as exc:\n"
-        " result={'ok':False,'error_type':type(exc).__name__,'error':str(exc)}\n"
-        "print('SCI_PS_API_PROBE=' + json.dumps(result,ensure_ascii=False))\n"
-    )
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True, text=True,
-            timeout=max(0.5, float(timeout_seconds)),
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-        )
-        marker = "SCI_PS_API_PROBE="
-        payload = next(
-            (line[len(marker):] for line in reversed(completed.stdout.splitlines()) if line.startswith(marker)),
-            None,
-        )
-        if payload is not None:
-            result = json.loads(payload)
-            result["return_code"] = completed.returncode
-        else:
-            result = {
-                "ok": False, "timed_out": False,
-                "error_type": "ProbeOutputMissing",
-                "error": (completed.stderr or completed.stdout or "The API probe returned no structured result.")[-3000:],
-                "return_code": completed.returncode,
-            }
-    except subprocess.TimeoutExpired:
-        result = {
-            "ok": False, "timed_out": True,
-            "error_type": "ConnectionTimeout",
-            "error": f"photoshop-python-api probe exceeded {timeout_seconds:.1f} seconds; only the probe process was terminated.",
-        }
-    except Exception as exc:
-        result = {
-            "ok": False, "timed_out": False,
-            "error_type": type(exc).__name__, "error": str(exc),
-        }
-    result["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
-    return result
-
-
 def parse_tasklist_csv(output: str) -> list[dict[str, Any]]:
     """Parse tasklist CSV output without relying on window titles."""
     processes: list[dict[str, Any]] = []
