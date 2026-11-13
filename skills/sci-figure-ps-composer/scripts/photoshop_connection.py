@@ -35,12 +35,20 @@ def _photoshop_progids() -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _get_active_win32com_application() -> tuple[Any, str]:
+def _get_active_win32com_application(identifier: str | None = None) -> tuple[Any, str]:
     """Attach to an already-running instance using late-bound COM; never activate one."""
     if os.name != "nt":
         raise OSError("win32com is available only on Windows.")
     pythoncom = importlib.import_module("pythoncom")
     dynamic = importlib.import_module("win32com.client.dynamic")
+    if identifier:
+        if identifier.startswith("CLSID:"):
+            class_id = identifier[len("CLSID:"):]
+        else:
+            class_id = pythoncom.CLSIDFromProgID(identifier)
+        raw_dispatch = pythoncom.GetActiveObject(class_id)
+        return dynamic.Dispatch(raw_dispatch), identifier
+
     failures: list[str] = []
     for progid in _photoshop_progids():
         try:
@@ -79,7 +87,7 @@ def _win32com_probe_worker(connection) -> None:
         fields = str(value).split(chr(9), 1)
         connection.send({
             "ok": True,
-            "progid": progid,
+            "identifier": progid,
             "photoshop_version": fields[0],
             "open_document_count": int(fields[1]) if len(fields) > 1 else None,
         })
@@ -149,11 +157,11 @@ def probe_win32com(timeout_seconds: float = 4.0) -> dict[str, Any]:
     return result
 
 
-def connect_win32com_application() -> tuple[Any, str]:
+def connect_win32com_application(identifier: str | None = None) -> tuple[Any, str]:
     """Return a late-bound dispatch to an already-running Photoshop instance."""
     pythoncom = importlib.import_module("pythoncom")
     pythoncom.CoInitialize()
-    return _get_active_win32com_application()
+    return _get_active_win32com_application(identifier)
 
 
 def probe_photoshop_python_api(timeout_seconds: float = 8.0) -> dict[str, Any]:
