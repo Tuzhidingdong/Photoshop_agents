@@ -141,7 +141,7 @@ The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups
 ### Bridge behavior
 
 1. Run a bounded Win32COM probe in a separate process using GetActiveObject; the probe attaches to an already-running Photoshop instance and never launches or terminates Photoshop.
-2. When the Win32COM probe succeeds, attach with late-bound dynamic dispatch. If unavailable, probe photoshop-python-api in a killable subprocess before attempting its in-process fallback.
+2. When the Win32COM probe succeeds, attach with late-bound dynamic dispatch. If unavailable, probe `comtypes.client.GetActiveObject(dynamic=True)` in a killable subprocess, then attach to the exact active object identifier returned by the probe.
 3. Record the selected backend, both probe results, Photoshop process metadata, and a read-only comtypes cache inventory.
 4. Execute JSX through the selected backend's doJavaScript() method. Both backends use the same native Photoshop JSX execution path.
 5. Normalize Python/COM/JSX failures as PhotoshopBridgeError, preserving the operation stage, exception type, message, and a short JSX preview.
@@ -151,7 +151,7 @@ The Stage 7 demo inspects canvas geometry, DPI, color mode/profile, panel groups
 
 The unit lock intentionally changes Photoshop's global preferences and leaves them set to Pixels and Points. It does not create, close, or modify a document.
 
-The process list does not use an empty main-window title as a health signal. Multiple Photoshop processes produce a warning only; the toolkit never terminates a Photoshop process automatically. The comtypes cache is inspected read-only: the presence of generated files does not prove corruption and does not trigger deletion.
+The process list does not use an empty main-window title as a health signal. Both COM backends use Running Object Table attachment (`GetActiveObject`) rather than `CreateObject`, so connection recovery does not intentionally launch another Photoshop instance. Multiple Photoshop processes produce a warning only; the toolkit never terminates a Photoshop process automatically. The comtypes cache is inspected read-only: the presence of generated files does not prove corruption and does not trigger deletion.
 
 Use --connect-timeout to adjust the isolated Win32COM probe timeout. Use --silent-dialogs only for unattended tasks: each JSX call temporarily sets app.displayDialogs to DialogModes.NO and restores the previous value in a finally block. It is not enabled by default.
 
